@@ -3,7 +3,9 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "led_engine.h"
+#ifndef LILUM_KIVSEE
 #include "simple_BLE.h"
+#endif
 #include "button_service.h"
 #include "mic_service.h"
 #include "IMU_service.h"
@@ -74,6 +76,7 @@ void printTask(void *pvParameter) {
             }
         }
 
+#ifndef LILUM_KIVSEE
         if (LOG_ENABLE_BLE) {
             if (ORCHESTRA_ROLE == OrchestraRole::Master) {
                 pos += snprintf(buf + pos, sizeof(buf) - pos, " | Adv: %s",
@@ -85,6 +88,7 @@ void printTask(void *pvParameter) {
                                 (unsigned long)ble_ms_until_next_scan());
             }
         }
+#endif
 
         if (LOG_ENABLE_MIC) {
             uint8_t vol = mic_get_volume();
@@ -174,6 +178,8 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Power-on confirmed — bringing up the rest of the system");
 
     // ── Confirmed: bring up the rest of the system ─────────
+#ifndef LILUM_KIVSEE
+    // Standalone variant: BLE orchestra sync.
     ESP_LOGI(TAG, "Calling ble_init...");
     ble_init();
     ble_set_logging(false);
@@ -182,6 +188,12 @@ extern "C" void app_main(void) {
         esp_log_level_set("BLE_INIT", ESP_LOG_WARN);
     }
     ESP_LOGI(TAG, "ble_init completed");
+#else
+    // Kivsee variant: networked animations over WiFi/MQTT (Phase 3).
+    // Phase 1 scaffold: no networking yet — this branch only proves the
+    // build gating (BLE excluded). WiFi/MQTT/renderer bring-up comes later.
+    ESP_LOGI(TAG, "KIVSEE variant: BLE skipped (networking not yet implemented)");
+#endif
 
     ESP_LOGI(TAG, "Starting Mic Service");
     mic_service_init();

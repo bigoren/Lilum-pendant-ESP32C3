@@ -1,0 +1,14 @@
+# Partition table for the esp32c3_kivsee build (4 MB flash).
+# Single-app layout (no OTA) to maximize the app slot for the WiFi + MQTT +
+# kivsee-render stack, plus a SPIFFS data partition for thing_info and the
+# cached segment-config (objects-config). OTA can be added later by switching
+# to two ota_0/ota_1 slots if the merged app stays under ~1.5 MB.
+#
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x6000
+phy_init,   data, phy,      0xf000,    0x1000
+factory,    app,  factory,  0x10000,   0x2A0000
+spiffs,     data, spiffs,   0x2B0000,  0x140000
+# factory: 0x2A0000 = 2.625 MB app slot
+# spiffs:  0x140000 = 1.25 MB data
+# total used: 0x10000 + 0x2A0000 + 0x140000 = 0x3F0000 (~3.94 MB of 4 MB)

@@ -3,6 +3,26 @@
 
 FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
 
+# --- Build-variant component gating ---------------------------------------
+# PlatformIO exports the active environment name as $ENV{PIOENV}. The kivsee
+# variant must NOT link orchestra_ble (it pulls in the BT/NimBLE stack, which
+# is disabled in sdkconfig.defaults.esp32c3_kivsee). The standalone variant
+# keeps it. Components common to both go in COMMON_REQUIRES.
+set(COMMON_REQUIRES
+    mic_service
+    IMU_service
+    battery_service
+)
+
+if("$ENV{PIOENV}" STREQUAL "esp32c3_kivsee")
+    message(STATUS "Lilum: building KIVSEE variant (WiFi, no BLE)")
+    # Phase 1: no kivsee components yet — just prove orchestra_ble is excluded.
+    set(VARIANT_REQUIRES "")
+else()
+    message(STATUS "Lilum: building STANDALONE variant (BLE orchestra)")
+    set(VARIANT_REQUIRES orchestra_ble)
+endif()
+
 idf_component_register(
   SRCS
     "main.cpp"
@@ -10,8 +30,6 @@ idf_component_register(
     "."
     "../include"
   REQUIRES
-    orchestra_ble
-    mic_service
-    IMU_service
-    battery_service
+    ${COMMON_REQUIRES}
+    ${VARIANT_REQUIRES}
 )
