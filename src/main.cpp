@@ -2,9 +2,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "led_engine.h"
 #ifndef LILUM_KIVSEE
+#include "led_engine.h"
 #include "simple_BLE.h"
+#else
+#include "kivsee_app.h"
 #endif
 #include "button_service.h"
 #include "mic_service.h"
@@ -15,6 +17,9 @@
 #include "nvs_flash.h"
 
 static const char *TAG = "MAIN";
+
+#ifndef LILUM_KIVSEE
+// ── Standalone (FastLED) variant ───────────────────────────────────────────
 uint8_t animationNumber = 0; // Global variable for animation selection
 
 // ── Gesture → white-mode toggle (mirrors button double-tap) ──
@@ -57,23 +62,38 @@ void ledTask(void *pvParameter) {
         xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(16));
     }
 }
+#else
+// ── Kivsee (networked) variant ─────────────────────────────────────────────
+// Runs the WiFi/MQTT/render pipeline from lib/kivsee_app as a single task,
+// after the shared boot prefix (power-on gate + sensors).
+static void kivseeTask(void *pvParameter) {
+    ESP_LOGI(TAG, "Kivsee Task started");
+    kivsee_app_setup();
+    while (1) {
+        kivsee_app_loop();
+    }
+}
+#endif
 
 void printTask(void *pvParameter) {
     ESP_LOGI(TAG, "Print Task started");
     TickType_t xLastWakeTime = xTaskGetTickCount();
     while (1) {
-        extern uint8_t g_animation_mode; // from led_engine
-
         // Build the log line dynamically based on logging_config.h
         char buf[256];
         int pos = 0;
 
         if (LOG_ENABLE_MAIN) {
+#ifndef LILUM_KIVSEE
+            extern uint8_t g_animation_mode; // from led_engine
             if (ORCHESTRA_ROLE == OrchestraRole::Master) {
                 pos += snprintf(buf + pos, sizeof(buf) - pos, "Master | Anim: %u", g_animation_mode);
             } else {
                 pos += snprintf(buf + pos, sizeof(buf) - pos, "Follower | Anim: %u", g_animation_mode);
             }
+#else
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "Kivsee");
+#endif
         }
 
 #ifndef LILUM_KIVSEE
@@ -162,6 +182,9 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Initialising Battery Service (IP5306)");
     battery_service_init();
 
+#ifndef LILUM_KIVSEE
+    // Standalone: start the FastLED engine now with the boot-blink overlay so
+    // the ring visibly blinks while we wait for the power-on long-press.
     ESP_LOGI(TAG, "Starting LED Task (boot-blink overlay ON)");
     led_engine_set_boot_blink(true);
     xTaskCreate(ledTask, // Task function
@@ -171,10 +194,16 @@ extern "C" void app_main(void) {
         1, // Task priority
         NULL // Task handle
     );
+#endif
+    // NOTE (kivsee): the NeoPixelBus renderer needs WiFi/SPIFFS, which come up
+    // only after power-on is confirmed, so there is no boot-blink during the
+    // gate in the kivsee variant yet. A shared boot-blink is Phase 4 work.
 
     ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
     battery_power_on_confirm(4000);   // returns only on success
+#ifndef LILUM_KIVSEE
     led_engine_set_boot_blink(false);
+#endif
     ESP_LOGI(TAG, "Power-on confirmed — bringing up the rest of the system");
 
     // ── Confirmed: bring up the rest of the system ─────────
@@ -189,10 +218,16 @@ extern "C" void app_main(void) {
     }
     ESP_LOGI(TAG, "ble_init completed");
 #else
-    // Kivsee variant: networked animations over WiFi/MQTT (Phase 3).
-    // Phase 1 scaffold: no networking yet — this branch only proves the
-    // build gating (BLE excluded). WiFi/MQTT/renderer bring-up comes later.
-    ESP_LOGI(TAG, "KIVSEE variant: BLE skipped (networking not yet implemented)");
+    // Kivsee variant: start the networked-animation task (WiFi/MQTT/renderer).
+    // Larger stack than the FastLED task: WiFi + MQTT + protobuf decode + HTTP.
+    ESP_LOGI(TAG, "Starting Kivsee Task (WiFi/MQTT/renderer)");
+    xTaskCreate(kivseeTask,
+        "Kivsee Task",
+        8192,
+        NULL,
+        1,
+        NULL
+    );
 #endif
 
     ESP_LOGI(TAG, "Starting Mic Service");

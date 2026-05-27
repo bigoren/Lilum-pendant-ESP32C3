@@ -1,5 +1,7 @@
 #include "button_service.h"
-#include "led_engine.h"
+#ifndef LILUM_KIVSEE
+#include "led_engine.h"   // standalone variant: button drives the FastLED engine
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -63,6 +65,8 @@ static bool     whiteWasActiveBeforePress = false; // track if white mode was on
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+#ifndef LILUM_KIVSEE
+// ── Standalone variant: button actions drive the FastLED led_engine ─────────
 static void enter_white_mode(void)
 {
     saved_manual_mode    = g_manual_mode_active;
@@ -149,6 +153,15 @@ static void brightness_ramp_tick(uint32_t now)
         break;
     }
 }
+#else
+// ── Kivsee variant: button press-detection runs, but actions are not yet
+// wired to anything (kivsee animations are network-driven). These are
+// no-ops so button_service has no led_engine dependency. TODO (Phase 3+):
+// map button gestures to kivsee behavior (e.g. brightness, trigger).
+static void handle_single_short_press(void) { ESP_LOGI(TAG, "short press (no-op in kivsee)"); }
+static void handle_double_press(void)       { ESP_LOGI(TAG, "double press (no-op in kivsee)"); }
+static void brightness_ramp_tick(uint32_t)  { }
+#endif
 
 // ---------------------------------------------------------------------------
 // Main polling function (called every POLL_MS from the task)
@@ -180,7 +193,11 @@ static void button_poll(void)
             rampStepT   = now;
 
             // Remember if white mode was already on at the start of this press
+#ifndef LILUM_KIVSEE
             whiteWasActiveBeforePress = led_engine_is_white_mode();
+#else
+            whiteWasActiveBeforePress = false;
+#endif
 
         } else {
             // ---- Stable RELEASE edge (LOW → HIGH) ----

@@ -14,9 +14,10 @@ set(COMMON_REQUIRES
     battery_service
 )
 
-if("$ENV{PIOENV}" STREQUAL "esp32c3_kivsee")
+if(LILUM_VARIANT STREQUAL "kivsee")
     message(STATUS "Lilum: building KIVSEE variant (WiFi, no BLE)")
-    # Phase 1: no kivsee components yet — just prove orchestra_ble is excluded.
+    # kivsee animation code lives in lib/kivsee_app (a PlatformIO library), not
+    # a component, so nothing extra is REQUIRED here; orchestra_ble is excluded.
     set(VARIANT_REQUIRES "")
 else()
     message(STATUS "Lilum: building STANDALONE variant (BLE orchestra)")
