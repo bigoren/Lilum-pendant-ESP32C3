@@ -35,8 +35,10 @@ The project is built with [PlatformIO](https://platformio.org/) using a hybrid
 ESP-IDF + Arduino framework. There is **no custom build script** — the single
 build environment, `esp32c3_custom`, is defined in
 [platformio.ini](platformio.ini). The platform is pinned to
-**`espressif32@6.12.0`** (which bundles ESP-IDF 5.5.0), so the toolchain stays
-fixed until you bump it deliberately.
+**`espressif32@6.12.0`**, so the toolchain stays fixed until you bump it
+deliberately. Note that because the framework is `espidf, arduino`, PlatformIO
+resolves **ESP-IDF 4.4.7** (the version the bundled Arduino-ESP32 core requires)
+rather than the 5.5.0 the standalone platform would use.
 
 **In VS Code:** use the PlatformIO toolbar/sidebar buttons directly —
 **Build**, **Upload**, **Monitor**. They automatically use the `esp32c3_custom`
