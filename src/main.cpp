@@ -199,8 +199,18 @@ extern "C" void app_main(void) {
     // only after power-on is confirmed, so there is no boot-blink during the
     // gate in the kivsee variant yet. A shared boot-blink is Phase 4 work.
 
+#ifdef LILUM_GATE_BYPASS
+    // Opt-in dev bypass (default OFF). Skips the power-on long-press gate so
+    // the device boots straight through — useful when iterating on USB, where
+    // battery_power_off() cannot cut the rail and the gate otherwise hangs.
+    // Enable per-checkout by uncommenting `-D LILUM_GATE_BYPASS=1` in the
+    // kivsee env's build_flags (platformio.ini). Do NOT enable for shipped /
+    // battery-powered builds — it disables the user-confirmation safety check.
+    ESP_LOGW(TAG, "LILUM_GATE_BYPASS: skipping power-on long-press confirmation");
+#else
     ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
     battery_power_on_confirm(4000);   // returns only on success
+#endif
 #ifndef LILUM_KIVSEE
     led_engine_set_boot_blink(false);
 #endif

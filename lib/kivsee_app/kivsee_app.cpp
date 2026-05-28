@@ -1,7 +1,14 @@
 // Kivsee networked-animation app implementation (esp32c3_kivsee variant only).
-// Adapted from the esp32-animations project's main.cpp setup()/loop(), with the
-// Serial/SPIFFS bring-up that the Lilum boot prefix already handles removed, and
-// Influxdb metrics reporting omitted (no-op on C3).
+// Adapted from the esp32-animations project's main.cpp setup()/loop(), minus
+// the SPIFFS bring-up that the Lilum boot prefix already handles, and minus
+// Influxdb metrics reporting (no-op on C3).
+//
+// All logging here uses ESP_LOG* (not the upstream Arduino Serial.print*) so
+// it lands on the same USB-Serial/JTAG console as the rest of the firmware —
+// the Arduino `Serial` object wraps UART0 in this build and goes to physical
+// pins, not the monitor. The deeply-vendored files (fs_manager, mqtt_manager,
+// segment_store, etc.) are left untouched and still use Serial; their output
+// is silent on the monitor for now (acceptable trade vs. modifying upstream).
 
 #include "kivsee_app.h"
 
@@ -12,6 +19,9 @@
 #include <ArduinoOTA.h>
 #include <SPIFFS.h>
 #include <cstring>
+#include "esp_log.h"
+
+static const char *TAG = "KIVSEE";
 
 #include "secrets.h"
 #include "segment_store.h"
@@ -82,13 +92,12 @@ static void ConnectToWifi()
     WiFi.disconnect();
     WiFi.mode(WIFI_STA);
     WiFi.begin(SSID, WIFI_PASSWORD);
-    Serial.print("Attempting to connect to SSID: ");
-    Serial.println(SSID);
+    ESP_LOGI(TAG, "Attempting to connect to SSID: %s", SSID);
   }
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    Serial.println("connected to wifi");
+    ESP_LOGI(TAG, "connected to wifi");
     connecting = false;
     httpGetConfig(thing_name);
     return;
@@ -96,17 +105,17 @@ static void ConnectToWifi()
 
   if (millis() - connectStartTime >= 10000)
   {
-    Serial.println(" could not connect for 10 seconds. retry");
+    ESP_LOGW(TAG, "could not connect for 10 seconds. retry");
     connecting = false;
   }
 }
 
 void kivsee_app_setup(void)
 {
-  // SPIFFS is mounted here (the Lilum boot prefix does not mount it).
+  ESP_LOGI(TAG, "kivsee_app_setup: mounting SPIFFS");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("An Error has occurred while mounting SPIFFS");
+    ESP_LOGE(TAG, "SPIFFS mount failed");
     return;
   }
 
@@ -114,16 +123,17 @@ void kivsee_app_setup(void)
   while (!hasThingName)
   {
     strcpy(thing_name, "no name");
-    Serial.println("Thing name not configured - upload 'thing_info' file to continue");
+    ESP_LOGW(TAG, "Thing name not configured — upload 'thing_info' to SPIFFS (pio run -e esp32c3_kivsee -t uploadfs)");
     delay(5000);
     hasThingName = fsManager.ReadThingName(thing_name, MAX_THING_NAME_LENGTH);
   }
-  Serial.print("Thing name: "); Serial.println(thing_name);
+  ESP_LOGI(TAG, "Thing name: %s", thing_name);
 
   uint16_t number_of_leds = readNumberOfPixels();
   if (number_of_leds == 0) {
     number_of_leds = 300;
   }
+  ESP_LOGI(TAG, "Renderer init: %u LEDs", (unsigned)number_of_leds);
 
   renderer = new esp32animations::Renderer(queueManager, number_of_leds);
   initSegmentStore(renderer->hsv_painting_array(), number_of_leds);
@@ -135,24 +145,26 @@ void kivsee_app_setup(void)
   ArduinoOTA.setHostname(thing_name);
   ArduinoOTA
       .onStart([]() {
-        String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
-        Serial.println("Start updating " + type);
+        const char *type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+        ESP_LOGI(TAG, "OTA: start updating %s", type);
       })
-      .onEnd([]() { Serial.println("\nEnd"); })
+      .onEnd([]() { ESP_LOGI(TAG, "OTA: end"); })
       .onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+        ESP_LOGI(TAG, "OTA progress: %u%%", (progress / (total / 100)));
       })
       .onError([](ota_error_t error) {
-        Serial.printf("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR)         Serial.println("Auth Failed");
-        else if (error == OTA_BEGIN_ERROR)   Serial.println("Begin Failed");
-        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-        else if (error == OTA_END_ERROR)     Serial.println("End Failed");
+        const char *err =
+            (error == OTA_AUTH_ERROR)    ? "Auth Failed"    :
+            (error == OTA_BEGIN_ERROR)   ? "Begin Failed"   :
+            (error == OTA_CONNECT_ERROR) ? "Connect Failed" :
+            (error == OTA_RECEIVE_ERROR) ? "Receive Failed" :
+            (error == OTA_END_ERROR)     ? "End Failed"     : "Unknown";
+        ESP_LOGE(TAG, "OTA error[%u]: %s", error, err);
       });
 
   ArduinoOTA.begin();
   timeManager.begin();
+  ESP_LOGI(TAG, "kivsee_app_setup: complete");
 }
 
 void kivsee_app_loop(void)
@@ -172,11 +184,11 @@ void kivsee_app_loop(void)
   // Status report (every 5s).
   if (current_millis - lastReportTime >= 5000)
   {
-    Serial.printf("[kivsee] millis=%lu wifi=%d mqtt=%d rssi=%ld\n",
-                  (unsigned long)millis(),
-                  WiFi.status() == WL_CONNECTED,
-                  mqttManager->connected(),
-                  (long)WiFi.RSSI());
+    ESP_LOGI(TAG, "millis=%lu wifi=%d mqtt=%d rssi=%ld",
+             (unsigned long)millis(),
+             WiFi.status() == WL_CONNECTED,
+             mqttManager->connected(),
+             (long)WiFi.RSSI());
     lastReportTime = current_millis;
   }
 

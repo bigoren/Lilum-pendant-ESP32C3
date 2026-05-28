@@ -84,6 +84,8 @@ Console output uses USB-serial-JTAG.
 
 ## Per-device configuration
 
+### Standalone variant (`esp32c3_custom`)
+
 Each pendant's identity and BLE timing are **compile-time constants** in
 [include/orchestra_shared_config.h](include/orchestra_shared_config.h) — edit
 these per device before flashing:
@@ -99,6 +101,31 @@ these per device before flashing:
 
 > A code comment notes the long-term plan is to manage these from a phone app
 > and persist them in NVS, replacing the per-build edits.
+
+### Kivsee variant (`esp32c3_kivsee`)
+
+The kivsee build needs WiFi credentials and a per-device **thing name** (used
+in MQTT topics and HTTP fetches against the kivsee server).
+
+1. **WiFi credentials** — copy [include/secrets_template.h](include/secrets_template.h)
+   to `include/secrets.h` and fill in `SSID` / `WIFI_PASSWORD`. `secrets.h` is
+   gitignored.
+2. **Thing name** — create `data/thing_info` containing a single line with the
+   device's name (e.g. `ring0`). See [data/thing_info.example](data/thing_info.example)
+   as a template. `data/` is gitignored except for the example, so each device's
+   name stays local. The file is uploaded to the device's SPIFFS partition,
+   **separately from the firmware**:
+
+   ```bash
+   # Once per device (or whenever you change the thing name):
+   pio run -e esp32c3_kivsee -t uploadfs
+   ```
+
+   The kivsee task reads `data/thing_info` at boot; without it the task is stuck
+   waiting and you'll see no WiFi/MQTT activity in the monitor.
+3. **Server IPs** — set in `[env:esp32c3_kivsee]` build flags in
+   [platformio.ini](platformio.ini) (`MQTT_BROKER_IP`, `TIME_SERVER_IP`,
+   `LED_OBJECT_SERVICE_IP`, `LED_SEQ_SERVICE_IP`).
 
 ---
 
