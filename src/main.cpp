@@ -2,11 +2,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "led_engine.h"   // FastLED engine; runs in both envs
 #ifndef LILUM_KIVSEE
-#include "led_engine.h"
-#include "simple_BLE.h"
+#include "simple_BLE.h"   // BLE orchestra (standalone env only)
 #else
-#include "kivsee_app.h"
+#include "kivsee_app.h"   // networked kivsee task (kivsee env only)
 #endif
 #include "button_service.h"
 #include "mic_service.h"
@@ -18,8 +18,11 @@
 
 static const char *TAG = "MAIN";
 
-#ifndef LILUM_KIVSEE
-// ── Standalone (FastLED) variant ───────────────────────────────────────────
+// ── FastLED engine + gesture helpers (shared by both envs) ────────────────
+// In esp32c3_custom this is the only LED path. In esp32c3_kivsee this also
+// runs in both runtime modes — FastLED owns the RMT peripheral; in kivsee
+// mode the external Renderer writes into led_engine's shared buffer and
+// led_engine just passes it through (see led_engine_set_source).
 uint8_t animationNumber = 0; // Global variable for animation selection
 
 // ── Gesture → white-mode toggle (mirrors button double-tap) ──
@@ -62,10 +65,12 @@ void ledTask(void *pvParameter) {
         xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(16));
     }
 }
-#else
-// ── Kivsee (networked) variant ─────────────────────────────────────────────
+
+#ifdef LILUM_KIVSEE
+// ── Kivsee (networked) task — kivsee env only ─────────────────────────────
 // Runs the WiFi/MQTT/render pipeline from lib/kivsee_app as a single task,
-// after the shared boot prefix (power-on gate + sensors).
+// alongside the FastLED ledTask. Started conditionally based on NVS boot
+// mode (Phase 4); for Phase 1 still unconditional.
 static void kivseeTask(void *pvParameter) {
     ESP_LOGI(TAG, "Kivsee Task started");
     kivsee_app_setup();
@@ -84,16 +89,15 @@ void printTask(void *pvParameter) {
         int pos = 0;
 
         if (LOG_ENABLE_MAIN) {
-#ifndef LILUM_KIVSEE
             extern uint8_t g_animation_mode; // from led_engine
+            // ORCHESTRA_ROLE is a compile-time constant in both envs (orchestra
+            // is meaningful only in the standalone-env's BLE path, but the
+            // constant itself is harmless to read here).
             if (ORCHESTRA_ROLE == OrchestraRole::Master) {
                 pos += snprintf(buf + pos, sizeof(buf) - pos, "Master | Anim: %u", g_animation_mode);
             } else {
                 pos += snprintf(buf + pos, sizeof(buf) - pos, "Follower | Anim: %u", g_animation_mode);
             }
-#else
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "Kivsee");
-#endif
         }
 
 #ifndef LILUM_KIVSEE
@@ -182,9 +186,10 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Initialising Battery Service (IP5306)");
     battery_service_init();
 
-#ifndef LILUM_KIVSEE
-    // Standalone: start the FastLED engine now with the boot-blink overlay so
-    // the ring visibly blinks while we wait for the power-on long-press.
+    // FastLED engine runs in both envs (in the kivsee env it owns RMT for
+    // both standalone-mode and kivsee-mode rendering; the kivsee Renderer
+    // fills its shared buffer). Start it with the boot-blink overlay so the
+    // ring visibly blinks while waiting for the power-on long-press.
     ESP_LOGI(TAG, "Starting LED Task (boot-blink overlay ON)");
     led_engine_set_boot_blink(true);
     xTaskCreate(ledTask, // Task function
@@ -194,10 +199,6 @@ extern "C" void app_main(void) {
         1, // Task priority
         NULL // Task handle
     );
-#endif
-    // NOTE (kivsee): the NeoPixelBus renderer needs WiFi/SPIFFS, which come up
-    // only after power-on is confirmed, so there is no boot-blink during the
-    // gate in the kivsee variant yet. A shared boot-blink is Phase 4 work.
 
 #ifdef LILUM_GATE_BYPASS
     // Opt-in dev bypass (default OFF). Skips the power-on long-press gate so
@@ -211,9 +212,7 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
     battery_power_on_confirm(4000);   // returns only on success
 #endif
-#ifndef LILUM_KIVSEE
     led_engine_set_boot_blink(false);
-#endif
     ESP_LOGI(TAG, "Power-on confirmed — bringing up the rest of the system");
 
     // ── Confirmed: bring up the rest of the system ─────────
@@ -228,8 +227,11 @@ extern "C" void app_main(void) {
     }
     ESP_LOGI(TAG, "ble_init completed");
 #else
-    // Kivsee variant: start the networked-animation task (WiFi/MQTT/renderer).
-    // Larger stack than the FastLED task: WiFi + MQTT + protobuf decode + HTTP.
+    // Kivsee env: start the networked-animation task (WiFi/MQTT/renderer).
+    // Currently unconditional; Phase 4 will gate this on the NVS-backed
+    // app_mode flag so the kivsee env defaults to standalone mode on a fresh
+    // flash and only starts this task after the user opts into kivsee mode.
+    // Larger stack than the FastLED ledTask: WiFi + MQTT + protobuf + HTTP.
     ESP_LOGI(TAG, "Starting Kivsee Task (WiFi/MQTT/renderer)");
     xTaskCreate(kivseeTask,
         "Kivsee Task",

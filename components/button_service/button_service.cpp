@@ -1,7 +1,5 @@
 #include "button_service.h"
-#ifndef LILUM_KIVSEE
-#include "led_engine.h"   // standalone variant: button drives the FastLED engine
-#endif
+#include "led_engine.h"   // button drives the FastLED engine (both envs)
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -65,8 +63,18 @@ static bool     whiteWasActiveBeforePress = false; // track if white mode was on
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-#ifndef LILUM_KIVSEE
-// ── Standalone variant: button actions drive the FastLED led_engine ─────────
+// Button actions drive the FastLED led_engine in both envs. In the kivsee
+// env's kivsee runtime mode (source = LED_SRC_KIVSEE) we suppress the
+// pattern/brightness pokes because the external Renderer owns the buffer;
+// white mode is still allowed as a user override.
+#ifdef LILUM_KIVSEE
+static inline bool button_in_kivsee_mode(void) {
+    return led_engine_get_source() == LED_SRC_KIVSEE;
+}
+#else
+static inline bool button_in_kivsee_mode(void) { return false; }
+#endif
+
 static void enter_white_mode(void)
 {
     saved_manual_mode    = g_manual_mode_active;
@@ -93,6 +101,13 @@ static void handle_single_short_press(void)
         return;
     }
 
+    if (button_in_kivsee_mode()) {
+        // In kivsee mode the renderer owns the buffer; short press has no
+        // local action (TODO: map to kivsee behavior, e.g. trigger).
+        ESP_LOGI(TAG, "short press (no-op in kivsee mode)");
+        return;
+    }
+
     // First short press switches from auto → manual (pattern 0).
     // Subsequent presses advance through manual patterns.
     if (!g_manual_mode_active) {
@@ -107,6 +122,7 @@ static void handle_single_short_press(void)
 
 static void handle_double_press(void)
 {
+    // White mode is allowed in both modes — it's a global LED override.
     if (led_engine_is_white_mode()) {
         exit_white_mode();
     } else {
@@ -123,6 +139,12 @@ static void brightness_ramp_tick(uint32_t now)
         return;
     }
     rampStepT = now;
+
+    // Kivsee mode: don't ramp pattern brightness — the renderer drives output.
+    // (Global brightness MQTT message is the kivsee equivalent.)
+    if (button_in_kivsee_mode()) {
+        return;
+    }
 
     switch (rampPhase) {
     case RAMP_UP:
@@ -153,15 +175,6 @@ static void brightness_ramp_tick(uint32_t now)
         break;
     }
 }
-#else
-// ── Kivsee variant: button press-detection runs, but actions are not yet
-// wired to anything (kivsee animations are network-driven). These are
-// no-ops so button_service has no led_engine dependency. TODO (Phase 3+):
-// map button gestures to kivsee behavior (e.g. brightness, trigger).
-static void handle_single_short_press(void) { ESP_LOGI(TAG, "short press (no-op in kivsee)"); }
-static void handle_double_press(void)       { ESP_LOGI(TAG, "double press (no-op in kivsee)"); }
-static void brightness_ramp_tick(uint32_t)  { }
-#endif
 
 // ---------------------------------------------------------------------------
 // Main polling function (called every POLL_MS from the task)
@@ -193,11 +206,7 @@ static void button_poll(void)
             rampStepT   = now;
 
             // Remember if white mode was already on at the start of this press
-#ifndef LILUM_KIVSEE
             whiteWasActiveBeforePress = led_engine_is_white_mode();
-#else
-            whiteWasActiveBeforePress = false;
-#endif
 
         } else {
             // ---- Stable RELEASE edge (LOW → HIGH) ----
