@@ -1,6 +1,3 @@
-// app_mode: NVS-backed boot mode + runtime switch for the esp32c3_kivsee
-// build. See app_mode.h for the contract.
-
 #include "app_mode.h"
 
 #include "esp_log.h"
@@ -15,9 +12,6 @@ static const char *TAG = "APP_MODE";
 #define NVS_NAMESPACE "app_mode"
 #define NVS_KEY_MODE  "mode"
 
-// Live RAM mode, set from NVS at boot via app_mode_get_boot() and updated
-// by the switch helpers. Starts as STANDALONE so anything that calls
-// app_mode_current() before the first NVS read gets the safe default.
 static app_mode_t g_current_mode = APP_MODE_STANDALONE;
 static app_mode_start_kivsee_fn g_start_kivsee = NULL;
 
@@ -97,8 +91,7 @@ void app_mode_switch_to_kivsee(void)
         return;
     }
     ESP_LOGI(TAG, "switching STANDALONE -> KIVSEE (in-place)");
-    // Persist first so a crash mid-bringup still wakes up in kivsee mode
-    // and re-tries (or falls back via the no-hang paths in kivsee_app).
+    // Persist first so a crash mid-bringup wakes up retrying kivsee.
     app_mode_set_persistent(APP_MODE_KIVSEE);
     g_current_mode = APP_MODE_KIVSEE;
     g_start_kivsee();
@@ -108,8 +101,7 @@ void app_mode_switch_to_standalone(void)
 {
     ESP_LOGI(TAG, "switching to STANDALONE (via reboot)");
     app_mode_set_persistent(APP_MODE_STANDALONE);
-    // Brief delay so the log flushes and NVS write fully lands before
-    // the reset takes the UART down.
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100));  // let log flush + NVS land before UART dies
+
     esp_restart();
 }

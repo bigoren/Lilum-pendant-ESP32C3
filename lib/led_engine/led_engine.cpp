@@ -55,15 +55,9 @@ static bool         g_boot_blink_active   = false;
 #define BOOT_BLINK_PERIOD_MS  400  // full on/off cycle = 400 ms (≈2.5 Hz)
 
 #ifdef LILUM_KIVSEE
-// Connection-blink overlay (kivsee env only): 1 s on / 1 s off square wave on
-// global brightness. Same mechanism as boot-blink, slower cadence — used by
-// the kivsee connection wait to signal "trying to connect" visually.
 static bool g_connecting_blink_active = false;
 #define CONNECTING_BLINK_PERIOD_MS  2000
 
-// Which fills the animation buffer each frame in the kivsee binary. Default
-// LED_SRC_FASTLED runs the pattern selection; LED_SRC_KIVSEE skips it (the
-// external Renderer has already written `anim`).
 static led_src_t g_led_source = LED_SRC_FASTLED;
 #endif
 
@@ -630,8 +624,7 @@ void led_engine_loop() {
     if (s_led_power_on) {
 #ifdef LILUM_KIVSEE
         if (g_led_source == LED_SRC_KIVSEE) {
-            // Kivsee mode: the external Renderer wrote `anim` directly; do not
-            // touch the buffer here. White-mode still wins (user override).
+            // Buffer already filled by external Renderer; white-mode still wins.
             if (g_white_mode) {
                 fill_solid(anim, NUM_ANIM_LEDS, CRGB::White);
                 FastLED.setBrightness(LED_BRIGHTNESS_WHITE);
@@ -722,9 +715,6 @@ void led_engine_loop() {
         }
     }
 #ifdef LILUM_KIVSEE
-    // Connection-blink overlay (kivsee env): 1 s on / 1 s off. Same gating
-    // mechanism as boot-blink, slower cadence — used by the kivsee mode while
-    // waiting for WiFi to connect.
     if (g_connecting_blink_active) {
         bool on = ((now / (CONNECTING_BLINK_PERIOD_MS / 2)) & 1) == 0;
         if (!on) {

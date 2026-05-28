@@ -1,7 +1,7 @@
 #include "button_service.h"
-#include "led_engine.h"   // button drives the FastLED engine (both envs)
+#include "led_engine.h"
 #ifdef LILUM_KIVSEE
-#include "app_mode.h"     // triple-short-press switches runtime mode (kivsee env only)
+#include "app_mode.h"
 #endif
 
 #include <stdbool.h>
@@ -64,24 +64,18 @@ static uint32_t tFirstRelease       = 0;      // when the first short press was 
 static bool     whiteWasActiveBeforePress = false; // track if white mode was on when press started
 
 #ifdef LILUM_KIVSEE
-// For triple-press detection (kivsee env only — used to switch runtime
-// mode standalone <-> kivsee). In this env, a second short press does NOT
-// fire handle_double_press() immediately; instead it enters "waiting third"
-// and defers the double action by DOUBLE_PRESS_GAP_MS so a possible third
-// short can promote to triple. Trade-off: ~300 ms delay on double-press
-// white-mode toggle in the kivsee env (acceptable; standalone env is
-// unchanged and still has zero-delay double-press).
-static bool     waitingThirdPress   = false;  // got a double-press release, waiting for a third
-static uint32_t tSecondRelease      = 0;      // when the second short press was released
+// Triple-press = mode switch. The cost: in this env, double-press fires
+// DOUBLE_PRESS_GAP_MS after the 2nd release (not immediately) to leave a
+// window for a 3rd press to promote to triple.
+static bool     waitingThirdPress   = false;
+static uint32_t tSecondRelease      = 0;
 #endif
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-// Button actions drive the FastLED led_engine in both envs. In the kivsee
-// env's kivsee runtime mode (source = LED_SRC_KIVSEE) we suppress the
-// pattern/brightness pokes because the external Renderer owns the buffer;
-// white mode is still allowed as a user override.
+// In kivsee runtime mode the Renderer owns the buffer; pattern/brightness
+// pokes are suppressed. White-mode is always allowed (global override).
 #ifdef LILUM_KIVSEE
 static inline bool button_in_kivsee_mode(void) {
     return led_engine_get_source() == LED_SRC_KIVSEE;
@@ -117,14 +111,11 @@ static void handle_single_short_press(void)
     }
 
     if (button_in_kivsee_mode()) {
-        // In kivsee mode the renderer owns the buffer; short press has no
-        // local action (TODO: map to kivsee behavior, e.g. trigger).
+        // TODO: map to kivsee behavior (e.g. trigger).
         ESP_LOGI(TAG, "short press (no-op in kivsee mode)");
         return;
     }
 
-    // First short press switches from auto → manual (pattern 0).
-    // Subsequent presses advance through manual patterns.
     if (!g_manual_mode_active) {
         g_manual_mode_active = true;
         g_manual_pattern = 0;
@@ -137,7 +128,6 @@ static void handle_single_short_press(void)
 
 static void handle_double_press(void)
 {
-    // White mode is allowed in both modes — it's a global LED override.
     if (led_engine_is_white_mode()) {
         exit_white_mode();
     } else {
@@ -148,17 +138,11 @@ static void handle_double_press(void)
 #ifdef LILUM_KIVSEE
 static void handle_triple_press(void)
 {
-    // Triple-short-press toggles the runtime mode. From standalone we go
-    // in-place to kivsee (WiFi/MQTT bring-up; connecting-blink while it
-    // happens; no-hang fallbacks reboot us back to standalone if the
-    // network never comes up). From kivsee we persist STANDALONE and
-    // reboot — WiFi/MQTT/SPIFFS teardown on IDF 4.4.7 is fragile so a
-    // clean restart is the robust path.
     if (app_mode_current() == APP_MODE_STANDALONE) {
-        ESP_LOGI(TAG, "triple press: STANDALONE -> KIVSEE (in-place)");
+        ESP_LOGI(TAG, "triple press: STANDALONE -> KIVSEE");
         app_mode_switch_to_kivsee();
     } else {
-        ESP_LOGI(TAG, "triple press: KIVSEE -> STANDALONE (reboot)");
+        ESP_LOGI(TAG, "triple press: KIVSEE -> STANDALONE");
         app_mode_switch_to_standalone();   // does not return
     }
 }
@@ -174,8 +158,6 @@ static void brightness_ramp_tick(uint32_t now)
     }
     rampStepT = now;
 
-    // Kivsee mode: don't ramp pattern brightness — the renderer drives output.
-    // (Global brightness MQTT message is the kivsee equivalent.)
     if (button_in_kivsee_mode()) {
         return;
     }
@@ -248,33 +230,24 @@ static void button_poll(void)
                 uint32_t duration = now - tPressStart;
 
                 if (!longUsed && duration >= DEBOUNCE_MS && duration < LONG_PRESS_MS) {
-                    // Short press detected
 #ifdef LILUM_KIVSEE
                     if (waitingThirdPress && (now - tSecondRelease) <= DOUBLE_PRESS_GAP_MS) {
-                        // Third short press in window — promote to triple.
                         waitingThirdPress = false;
                         handle_triple_press();
                     } else if (waitingSecondPress && (now - tFirstRelease) <= DOUBLE_PRESS_GAP_MS) {
-                        // Second short press in window — defer the double
-                        // action by DOUBLE_PRESS_GAP_MS so a possible third
-                        // can promote to triple. The double fires on
-                        // timeout below if no third arrives.
+                        // Defer double action; a 3rd press may promote to triple.
                         waitingSecondPress = false;
                         waitingThirdPress  = true;
                         tSecondRelease     = now;
                     } else {
-                        // Could be first of a multi-press — wait to see
                         waitingSecondPress = true;
                         tFirstRelease      = now;
                     }
 #else
                     if (waitingSecondPress && (now - tFirstRelease) <= DOUBLE_PRESS_GAP_MS) {
-                        // Second press of a double-press — fire immediately
-                        // (no triple-press in the standalone env).
                         waitingSecondPress = false;
                         handle_double_press();
                     } else {
-                        // Could be first of a double-press — wait to see
                         waitingSecondPress = true;
                         tFirstRelease      = now;
                     }

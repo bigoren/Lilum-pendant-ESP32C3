@@ -1,15 +1,6 @@
-// Kivsee networked-animation app implementation (esp32c3_kivsee env only).
-// Adapted from the esp32-animations project's main.cpp setup()/loop(), minus
-// Influxdb metrics reporting (no-op on C3). LED output writes into FastLED's
-// shared CRGB buffer in led_engine (see Renderer::show()) instead of a local
-// NeoPixelBus instance.
-//
-// All logging here uses ESP_LOG* (not the upstream Arduino Serial.print*) so
-// it lands on the same USB-Serial/JTAG console as the rest of the firmware —
-// the Arduino `Serial` object wraps UART0 in this build and goes to physical
-// pins, not the monitor. The deeply-vendored files (fs_manager, mqtt_manager,
-// segment_store, etc.) are left untouched and still use Serial; their output
-// is silent on the monitor for now (acceptable trade vs. modifying upstream).
+// Networked-animation app wrapper (kivsee env only). Logs via ESP_LOG so
+// they reach USB-Serial/JTAG; the upstream vendored files still use Arduino
+// Serial (UART0) and are silent on the monitor.
 
 #include "kivsee_app.h"
 
@@ -36,14 +27,8 @@ static const char *TAG = "KIVSEE";
 #include "time_manager.h"
 #include "queue_manager.h"
 
-// No-hang guarantee (see plan inherited-popping-marshmallow.md, Phase 5):
-// if the kivsee path cannot come up, we must fall back to standalone mode
-// (persist + reboot) rather than spin. The two failure paths are:
-//   - missing thing_info on SPIFFS (handled in kivsee_app_setup)
-//   - WiFi never connects (this timeout, enforced in kivsee_app_loop)
-// MQTT failures are intentionally soft — kivsee can render cached without
-// MQTT — so they do NOT contribute to this timeout.
-#define WIFI_FIRST_CONNECT_TIMEOUT_MS  180000  // 180 s
+// MQTT failures are soft (cached render still works) and do NOT trigger this.
+#define WIFI_FIRST_CONNECT_TIMEOUT_MS  180000
 
 #define MAX_THING_NAME_LENGTH 16
 static char thing_name[MAX_THING_NAME_LENGTH];
@@ -58,13 +43,7 @@ static TimeManager timeManager(queueManager.epoch_time_update_queue);
 static unsigned int lastWiFiCheckTime = 0;
 static unsigned int lastReportTime = 0;
 
-// First-connect tracking for the no-hang WiFi timeout. Anchor is set to
-// millis() at kivsee_app_setup; the 180 s clock runs from there until the
-// first successful WL_CONNECTED transition. After the first success this
-// flag is cleared and the timeout never re-arms — subsequent drop-outs are
-// handled by ConnectToWifi's normal 10 s retry without ever forcing a
-// fallback (a kivsee device that briefly loses WiFi should not reboot
-// itself out of kivsee mode).
+// Timer only arms before the first connect; later drop-outs are soft.
 static unsigned long wifi_first_attempt_ms = 0;
 static bool          wifi_ever_connected   = false;
 
@@ -124,7 +103,6 @@ static void ConnectToWifi()
     if (!wifi_ever_connected) {
       wifi_ever_connected = true;
       led_engine_set_connecting_blink(false);
-      ESP_LOGI(TAG, "first WiFi connect — clearing connecting-blink overlay");
     }
     httpGetConfig(thing_name);
     return;
@@ -146,30 +124,21 @@ void kivsee_app_setup(void)
     return;
   }
 
-  // No-hang fallback #1: missing thing_info. Previously this spun forever
-  // waiting for the file. Now: log a clear message, persist STANDALONE,
-  // reboot. The user can fix the SPIFFS image, re-flash, and triple-press
-  // to opt back into kivsee mode.
   if (!fsManager.ReadThingName(thing_name, MAX_THING_NAME_LENGTH)) {
     ESP_LOGE(TAG, "Thing name not configured — upload 'thing_info' to SPIFFS "
                   "(pio run -e esp32c3_kivsee -t uploadfs). Falling back to STANDALONE.");
     app_mode_switch_to_standalone();   // does not return
-    return;                            // unreachable; keeps the compiler happy
+    return;
   }
   ESP_LOGI(TAG, "Thing name: %s", thing_name);
 
-  // Arm the no-hang WiFi timer and start the connecting-blink overlay.
-  // ConnectToWifi clears the blink on the first WL_CONNECTED transition;
-  // kivsee_app_loop enforces the 180 s timeout if that never happens.
   wifi_first_attempt_ms = millis();
   wifi_ever_connected   = false;
   led_engine_set_connecting_blink(true);
 
-  // The physical ring is fixed in this firmware (27 animation LEDs after the
-  // status pixel). Ignore data/num_pixels — we drive FastLED's shared buffer
-  // and must match its size.
+  // Width is fixed by the hardware ring; ignore SPIFFS data/num_pixels.
   const uint16_t number_of_leds = (uint16_t)led_engine_num_anim_leds();
-  ESP_LOGI(TAG, "Renderer init: %u LEDs (hardware ring)", (unsigned)number_of_leds);
+  ESP_LOGI(TAG, "Renderer init: %u LEDs", (unsigned)number_of_leds);
 
   renderer = new esp32animations::Renderer(queueManager, number_of_leds);
   initSegmentStore(renderer->hsv_painting_array(), number_of_leds);
@@ -207,9 +176,6 @@ void kivsee_app_loop(void)
 {
   unsigned long current_millis = millis();
 
-  // No-hang fallback #2: WiFi never connects. Only arms before the first
-  // successful connect; after that, drop-outs are soft (ConnectToWifi
-  // retries every 10 s without forcing a fallback).
   if (!wifi_ever_connected &&
       current_millis - wifi_first_attempt_ms >= WIFI_FIRST_CONNECT_TIMEOUT_MS) {
     ESP_LOGE(TAG, "WiFi did not connect within %u ms — falling back to STANDALONE",

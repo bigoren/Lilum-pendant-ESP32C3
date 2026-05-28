@@ -11,9 +11,7 @@ namespace esp32animations
           m_leds_hsv(new kivsee_render::HSV[number_of_leds]),
           m_global_brightness(1.0)
     {
-        // FastLED owns the strip — its ledTask already initialised the
-        // controller via FastLED.addLeds() in led_engine_setup(). Nothing to
-        // do here; we just fill led_engine_anim_buffer() in show().
+        // led_engine_setup() owns FastLED.addLeds(); show() just fills the buffer.
     }
 
     void Renderer::loop(unsigned long current_millis)
@@ -112,10 +110,7 @@ namespace esp32animations
 
     void Renderer::show()
     {
-        // Write into FastLED's shared CRGB buffer (the 27-pixel animation
-        // slice exposed by led_engine). The FastLED ledTask calls
-        // FastLED.show() on its 16 ms tick — single RMT owner. Cap by both
-        // our HSV array length and the physical animation LED count.
+        // Fill led_engine's shared buffer; the ledTask calls FastLED.show().
         CRGB *out = led_engine_anim_buffer();
         const int hw_max = led_engine_num_anim_leds();
         const int n = (m_number_of_leds < (uint16_t)hw_max) ? m_number_of_leds : hw_max;

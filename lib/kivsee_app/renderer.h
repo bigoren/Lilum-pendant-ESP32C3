@@ -50,9 +50,6 @@ namespace esp32animations
     private:
         uint16_t m_number_of_leds;
         kivsee_render::HSV *m_leds_hsv;
-        // The output buffer is FastLED's shared CRGB[] inside led_engine; we
-        // only fill it here. The FastLED ledTask calls FastLED.show() on its
-        // 16 ms tick (single owner of the RMT peripheral).
         float m_global_brightness;
         unsigned long m_last_metrics_report_time = 0;
         Core1Metrics m_metrics = {
