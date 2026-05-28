@@ -32,26 +32,36 @@ master/follower "orchestra."
 ## Build & flash
 
 The project is built with [PlatformIO](https://platformio.org/) using a hybrid
-ESP-IDF + Arduino framework. There is **no custom build script** — the single
-build environment, `esp32c3_custom`, is defined in
-[platformio.ini](platformio.ini). The platform is pinned to
-**`espressif32@6.12.0`**, so the toolchain stays fixed until you bump it
-deliberately. Note that because the framework is `espidf, arduino`, PlatformIO
-resolves **ESP-IDF 4.4.7** (the version the bundled Arduino-ESP32 core requires)
-rather than the 5.5.0 the standalone platform would use.
+ESP-IDF + Arduino framework. There are **two build environments** sharing one
+source tree, defined in [platformio.ini](platformio.ini):
 
-**In VS Code:** use the PlatformIO toolbar/sidebar buttons directly —
-**Build**, **Upload**, **Monitor**. They automatically use the `esp32c3_custom`
-environment; nothing extra to configure.
+- **`esp32c3_custom`** — frozen Lilum standalone + BLE orchestra. The original
+  shipped build. Untouched by kivsee work except for shared-code bug fixes.
+- **`esp32c3_kivsee`** — one binary with two runtime modes (Lilum standalone +
+  networked kivsee), selected at boot from NVS and toggled at runtime via the
+  triple-press gesture. BLE is gated out of this env entirely. See
+  [Kivsee variant](#kivsee-variant-esp32c3_kivsee).
 
-**From the CLI**, the equivalents are:
+The platform is pinned to **`espressif32@6.12.0`**, so the toolchain stays fixed
+until you bump it deliberately. Because the framework is `espidf, arduino`,
+PlatformIO resolves **ESP-IDF 4.4.7** (the version the bundled Arduino-ESP32
+core requires) rather than the 5.5.0 the standalone platform would use.
+
+**In VS Code:** use the PlatformIO toolbar/sidebar buttons. Pick the env from
+the bottom-status-bar env picker — `esp32c3_custom` for shipped Lilum builds,
+`esp32c3_kivsee` for the dual-mode binary.
+
+**From the CLI:**
 
 ```bash
-# Build
-pio run -e esp32c3_custom
-
-# Build, upload, and open the serial monitor
+# Build the standalone (BLE) variant
 pio run -e esp32c3_custom -t upload -t monitor
+
+# Build the dual-mode (kivsee + standalone) variant
+pio run -e esp32c3_kivsee -t upload -t monitor
+
+# Upload the SPIFFS image (kivsee env only, holds thing_info)
+pio run -e esp32c3_kivsee -t uploadfs
 ```
 
 Serial monitor runs at **115200 baud** with the ESP32 exception decoder enabled.
@@ -104,8 +114,38 @@ these per device before flashing:
 
 ### Kivsee variant (`esp32c3_kivsee`)
 
-The kivsee build needs WiFi credentials and a per-device **thing name** (used
-in MQTT topics and HTTP fetches against the kivsee server).
+The kivsee build is **one binary that contains two runtime modes**, selected at
+boot from NVS:
+
+- **Standalone mode** (default on a fresh flash) — FastLED patterns + button
+  gestures, no radio at all. This is also where the device lands if the kivsee
+  path fails (see no-hang fallbacks below). BLE is gated out of this env, so
+  standalone *mode* in the kivsee env is BLE-free — distinct from the
+  `esp32c3_custom` env, which has BLE orchestra.
+- **Kivsee mode** — networked animations driven by WiFi + MQTT + the kivsee
+  renderer. FastLED still owns the LED hardware; the renderer writes into its
+  shared buffer.
+
+**Switching modes** — triple-short-press the user button (GPIO 9). From
+standalone, this brings up WiFi/MQTT in place (no reboot); the LED ring blinks
+**1 s on / 1 s off** while connecting. From kivsee, the firmware persists the
+new mode and reboots (WiFi/MQTT/SPIFFS teardown on IDF 4.4.7 is fragile, so a
+clean restart is the robust path). The choice persists across reboots until the
+next switch. Trade-off: the existing double-press white-mode toggle is delayed
+by ~300 ms in the kivsee env (the firmware waits to see if a third press is
+coming). The standalone env has no triple-press logic and its double-press is
+immediate as before.
+
+**No-hang fallbacks** — kivsee mode never locks the device into an
+unrecoverable spin. Two failure paths reboot back into standalone:
+
+- Missing `data/thing_info` on SPIFFS — single check, then reboot to standalone.
+- WiFi never connects within 180 s of the first attempt — reboot to standalone.
+  This timer only arms before the first successful connect; later drop-outs are
+  soft (kivsee can render cached without MQTT, and brief WiFi outages should not
+  kick a device out of kivsee mode).
+
+**Required per-device configuration for kivsee mode:**
 
 1. **WiFi credentials** — copy [include/secrets_template.h](include/secrets_template.h)
    to `include/secrets.h` and fill in `SSID` / `WIFI_PASSWORD`. `secrets.h` is
@@ -121,8 +161,8 @@ in MQTT topics and HTTP fetches against the kivsee server).
    pio run -e esp32c3_kivsee -t uploadfs
    ```
 
-   The kivsee task reads `data/thing_info` at boot; without it the task is stuck
-   waiting and you'll see no WiFi/MQTT activity in the monitor.
+   If `thing_info` is missing the firmware logs an error naming this command and
+   reboots back into standalone mode.
 3. **Server IPs** — set in `[env:esp32c3_kivsee]` build flags in
    [platformio.ini](platformio.ini) (`MQTT_BROKER_IP`, `TIME_SERVER_IP`,
    `LED_OBJECT_SERVICE_IP`, `LED_SEQ_SERVICE_IP`).
@@ -162,10 +202,15 @@ The button on **GPIO 9** is polled every 5 ms with debounce. Actions:
 | **Short press**       | First press: auto → manual (pattern 0). Then advances manual pattern.|
 | **Short press** (white)| Exits white mode.                                                  |
 | **Double press**      | Toggles white / flashlight mode.                                    |
+| **Triple press** *(kivsee env only)* | Switches runtime mode: standalone ↔ kivsee. See [Kivsee variant](#kivsee-variant-esp32c3_kivsee). |
 | **Long press (hold)** | Ramps brightness: up to max → holds → down to min → holds → repeats.|
 
 Brightness ranges from `LED_BRIGHTNESS_MIN` (40) to `LED_BRIGHTNESS_MAX` (200),
 defined in [lib/led_engine/led_engine.h](lib/led_engine/led_engine.h).
+
+In kivsee mode the short-press / brightness-ramp actions are suppressed (the
+network-driven renderer owns the LED buffer); double-press white-mode still
+works as a global override.
 
 ### 4. Tilt gesture (double-dip)
 
@@ -288,15 +333,20 @@ src/main.cpp                  app_main(): boot sequence + LED/print tasks
 include/
   orchestra_shared_config.h   per-device identity & BLE timing (edit per device)
   logging_config.h            serial-log toggles
+  secrets_template.h          WiFi creds template (copy to secrets.h)             [kivsee env]
 lib/led_engine/               FastLED animations, brightness, white/boot-blink   [Arduino]
+lib/kivsee_app/               WiFi/MQTT/renderer pipeline (vendored)             [kivsee env]
+lib/app_mode/                 NVS-backed runtime mode + switch helpers           [kivsee env]
 components/
   IMU_service/                LSM6DS3TR-C accel + double-dip gesture             [ESP-IDF]
   mic_service/                SPH0645 I2S mic: volume / beat / BPM               [ESP-IDF]
   battery_service/            IP5306 PMIC + NTC temp + power-on gate             [ESP-IDF]
-  button_service/             button UX (mode/pattern/brightness/white)          [ESP-IDF]
-  orchestra_ble/              NimBLE master/follower animation sync              [ESP-IDF]
-platformio.ini                build environment (esp32c3_custom)
-sdkconfig.defaults            source-of-truth IDF config
+  button_service/             button UX (mode/pattern/brightness/white/triple)   [ESP-IDF]
+  orchestra_ble/              NimBLE master/follower animation sync              [custom env]
+platformio.ini                build envs: esp32c3_custom (BLE), esp32c3_kivsee (WiFi+standalone)
+sdkconfig.defaults            source-of-truth IDF config (shared)
+sdkconfig.kivsee.defaults     per-env override: disables BLE in the kivsee env
+partitions_kivsee.csv         larger app slot + SPIFFS for the kivsee binary
 ```
 
 ### Boot sequence
@@ -306,7 +356,9 @@ sdkconfig.defaults            source-of-truth IDF config
 1. NVS init → 2. IMU init (brings up I2C) → 3. Battery/IP5306 config →
 4. LED task starts with the **boot-blink overlay** on →
 5. **wait for power-on long-press confirmation** (or power off) →
-6. BLE → 7. Mic → 8. Button → 9. battery monitor task → 10. print task.
+6. Radio: BLE (`esp32c3_custom` env) **or** read `app_mode` from NVS and start
+   the kivsee task if persisted (`esp32c3_kivsee` env; default standalone) →
+7. Mic → 8. Button → 9. battery monitor task → 10. print task.
 
 ---
 
