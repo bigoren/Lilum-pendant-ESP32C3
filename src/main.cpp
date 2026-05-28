@@ -7,6 +7,7 @@
 #include "simple_BLE.h"   // BLE orchestra (standalone env only)
 #else
 #include "kivsee_app.h"   // networked kivsee task (kivsee env only)
+#include "app_mode.h"     // NVS-backed runtime mode (kivsee env only)
 #endif
 #include "button_service.h"
 #include "mic_service.h"
@@ -69,14 +70,24 @@ void ledTask(void *pvParameter) {
 #ifdef LILUM_KIVSEE
 // ── Kivsee (networked) task — kivsee env only ─────────────────────────────
 // Runs the WiFi/MQTT/render pipeline from lib/kivsee_app as a single task,
-// alongside the FastLED ledTask. Started conditionally based on NVS boot
-// mode (Phase 4); for Phase 1 still unconditional.
+// alongside the FastLED ledTask. Launched only when active mode is KIVSEE,
+// either at boot (NVS read) or via the in-place switch from standalone.
 static void kivseeTask(void *pvParameter) {
     ESP_LOGI(TAG, "Kivsee Task started");
     kivsee_app_setup();
     while (1) {
         kivsee_app_loop();
     }
+}
+
+// Hook handed to app_mode so the in-place STANDALONE -> KIVSEE switch can
+// launch the task without app_mode having to depend on src/main.cpp. Also
+// flips the LED source so the FastLED ledTask passes the renderer's buffer
+// through instead of running pattern selection.
+static void start_kivsee_task(void) {
+    ESP_LOGI(TAG, "start_kivsee_task: launching Kivsee Task (in-place)");
+    led_engine_set_source(LED_SRC_KIVSEE);
+    xTaskCreate(kivseeTask, "Kivsee Task", 8192, NULL, 1, NULL);
 }
 #endif
 
@@ -227,19 +238,25 @@ extern "C" void app_main(void) {
     }
     ESP_LOGI(TAG, "ble_init completed");
 #else
-    // Kivsee env: start the networked-animation task (WiFi/MQTT/renderer).
-    // Currently unconditional; Phase 4 will gate this on the NVS-backed
-    // app_mode flag so the kivsee env defaults to standalone mode on a fresh
-    // flash and only starts this task after the user opts into kivsee mode.
-    // Larger stack than the FastLED ledTask: WiFi + MQTT + protobuf + HTTP.
-    ESP_LOGI(TAG, "Starting Kivsee Task (WiFi/MQTT/renderer)");
-    xTaskCreate(kivseeTask,
-        "Kivsee Task",
-        8192,
-        NULL,
-        1,
-        NULL
-    );
+    // Kivsee env: select runtime mode from NVS. Default on a fresh flash
+    // (no NVS value) is APP_MODE_STANDALONE so the device is never bricked
+    // by a bad WiFi/MQTT config — the user opts into kivsee via the
+    // triple-short-press gesture (Phase 6), which persists the choice.
+    //
+    // The FastLED ledTask is already running (started before the power-on
+    // gate) and currently has source = LED_SRC_FASTLED, which is what the
+    // standalone mode needs. For kivsee mode we install the start hook and
+    // launch the kivsee task here; the hook is also kept installed so the
+    // runtime in-place switch from standalone -> kivsee can reuse it.
+    app_mode_install_start_kivsee(start_kivsee_task);
+    if (app_mode_get_boot() == APP_MODE_KIVSEE) {
+        ESP_LOGI(TAG, "Boot mode: KIVSEE — starting networked task (WiFi/MQTT/renderer)");
+        // Larger stack than the FastLED ledTask: WiFi + MQTT + protobuf + HTTP.
+        led_engine_set_source(LED_SRC_KIVSEE);
+        xTaskCreate(kivseeTask, "Kivsee Task", 8192, NULL, 1, NULL);
+    } else {
+        ESP_LOGI(TAG, "Boot mode: STANDALONE — FastLED patterns only (no radio)");
+    }
 #endif
 
     ESP_LOGI(TAG, "Starting Mic Service");
