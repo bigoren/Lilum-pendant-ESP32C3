@@ -98,12 +98,7 @@ static void ConnectToWifi()
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    ESP_LOGI(TAG, "connected to wifi");
     connecting = false;
-    if (!wifi_ever_connected) {
-      wifi_ever_connected = true;
-      led_engine_set_connecting_blink(false);
-    }
     httpGetConfig(thing_name);
     return;
   }
@@ -172,9 +167,26 @@ void kivsee_app_setup(void)
   ESP_LOGI(TAG, "kivsee_app_setup: complete");
 }
 
+// dBm thresholds: > -60 good, -60..-75 average, < -75 poor.
+static const char *rssi_quality(long rssi)
+{
+  if (rssi >= -60) return "good";
+  if (rssi >= -75) return "average";
+  return "poor";
+}
+
 void kivsee_app_loop(void)
 {
   unsigned long current_millis = millis();
+
+  // Latch wifi_ever_connected the moment status flips — independent of the
+  // 10 s ConnectToWifi cadence and any MQTT-bringup blocking inside it.
+  bool wifi_connected = (WiFi.status() == WL_CONNECTED);
+  if (wifi_connected && !wifi_ever_connected) {
+    wifi_ever_connected = true;
+    led_engine_set_connecting_blink(false);
+    ESP_LOGI(TAG, "WiFi connected");
+  }
 
   if (!wifi_ever_connected &&
       current_millis - wifi_first_attempt_ms >= WIFI_FIRST_CONNECT_TIMEOUT_MS) {
@@ -197,11 +209,16 @@ void kivsee_app_loop(void)
   // Status report (every 5s).
   if (current_millis - lastReportTime >= 5000)
   {
-    ESP_LOGI(TAG, "millis=%lu wifi=%d mqtt=%d rssi=%ld",
-             (unsigned long)millis(),
-             WiFi.status() == WL_CONNECTED,
-             mqttManager->connected(),
-             (long)WiFi.RSSI());
+    unsigned long s = current_millis / 1000;
+    unsigned h = s / 3600;
+    unsigned m = (s / 60) % 60;
+    unsigned sec = s % 60;
+    long rssi = (long)WiFi.RSSI();
+    ESP_LOGI(TAG, "uptime=%02u:%02u:%02u wifi=%s mqtt=%s signal=%s",
+             h, m, sec,
+             wifi_connected ? "con" : "uncon",
+             mqttManager->connected() ? "con" : "uncon",
+             wifi_connected ? rssi_quality(rssi) : "n/a");
     lastReportTime = current_millis;
   }
 

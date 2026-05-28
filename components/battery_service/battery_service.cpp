@@ -85,7 +85,7 @@ static const char *TAG = "BAT";
 #define NTC_ADC_WIDTH       ADC_WIDTH_BIT_12
 
 // ── Periodic task ──────────────────────────────────────────
-#define BAT_POLL_MS         1000     // 1-second poll interval
+#define BAT_POLL_MS         2000     // 2-second poll interval
 #define BAT_TASK_STACK      3072
 
 // ── Shared state ───────────────────────────────────────────
