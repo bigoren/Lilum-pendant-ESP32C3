@@ -1,7 +1,7 @@
 {
   "name": "kivsee_app",
   "version": "0.1.0",
-  "description": "Networked kivsee animation app (WiFi/MQTT/renderer), vendored from the esp32-animations project for the esp32c3_kivsee build variant.",
+  "description": "Networked kivsee animation app (WiFi/MQTT/renderer), vendored from the esp32-animations project. Linked into the esp32c3_kivsee env only (esp32c3_custom lib_ignores it).",
   "build": {
     "flags": [
       "-Wno-error=class-memaccess"

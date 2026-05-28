@@ -1,14 +1,15 @@
 #pragma once
 
-// Kivsee networked-animation app (esp32c3_kivsee variant only).
+// Kivsee networked-animation app (linked into the esp32c3_kivsee env only;
+// the esp32c3_custom env lib_ignores this library).
 //
 // Wraps the WiFi / MQTT / time-sync / segment-store / renderer pipeline that
-// originated in the esp32-animations project. The Lilum app_main runs the
-// shared boot prefix (power-on gate + sensors), then — in the kivsee variant —
-// starts a task that calls kivsee_app_setup() once and kivsee_app_loop()
-// repeatedly. This mirrors the Arduino setup()/loop() model used upstream,
-// but driven from an explicit FreeRTOS task so the single app_main entry point
-// is preserved.
+// originated in the esp32-animations project. In the esp32c3_kivsee env this
+// is started by app_main when the active runtime mode is kivsee (NVS-backed
+// app_mode flag — Phase 4). The task calls kivsee_app_setup() once and
+// kivsee_app_loop() repeatedly, mirroring the Arduino setup()/loop() model
+// upstream, but driven from an explicit FreeRTOS task so app_main remains
+// the single entry point.
 
 #ifdef __cplusplus
 extern "C" {

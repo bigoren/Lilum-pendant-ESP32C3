@@ -1,7 +1,8 @@
-// Kivsee networked-animation app implementation (esp32c3_kivsee variant only).
+// Kivsee networked-animation app implementation (esp32c3_kivsee env only).
 // Adapted from the esp32-animations project's main.cpp setup()/loop(), minus
-// the SPIFFS bring-up that the Lilum boot prefix already handles, and minus
-// Influxdb metrics reporting (no-op on C3).
+// Influxdb metrics reporting (no-op on C3). LED output writes into FastLED's
+// shared CRGB buffer in led_engine (see Renderer::show()) instead of a local
+// NeoPixelBus instance.
 //
 // All logging here uses ESP_LOG* (not the upstream Arduino Serial.print*) so
 // it lands on the same USB-Serial/JTAG console as the rest of the firmware —
@@ -20,6 +21,7 @@
 #include <SPIFFS.h>
 #include <cstring>
 #include "esp_log.h"
+#include "led_engine.h"
 
 static const char *TAG = "KIVSEE";
 
@@ -129,11 +131,11 @@ void kivsee_app_setup(void)
   }
   ESP_LOGI(TAG, "Thing name: %s", thing_name);
 
-  uint16_t number_of_leds = readNumberOfPixels();
-  if (number_of_leds == 0) {
-    number_of_leds = 300;
-  }
-  ESP_LOGI(TAG, "Renderer init: %u LEDs", (unsigned)number_of_leds);
+  // The physical ring is fixed in this firmware (27 animation LEDs after the
+  // status pixel). Ignore data/num_pixels — we drive FastLED's shared buffer
+  // and must match its size.
+  const uint16_t number_of_leds = (uint16_t)led_engine_num_anim_leds();
+  ESP_LOGI(TAG, "Renderer init: %u LEDs (hardware ring)", (unsigned)number_of_leds);
 
   renderer = new esp32animations::Renderer(queueManager, number_of_leds);
   initSegmentStore(renderer->hsv_painting_array(), number_of_leds);

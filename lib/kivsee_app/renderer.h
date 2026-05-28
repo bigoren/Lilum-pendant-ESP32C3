@@ -3,12 +3,10 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-#include <NeoPixelBus.h>
 
 #include "animation.h"
 #include "runtime_animation.h"
 #include "hsv.h"
-#include "secrets.h"
 #include "queue_manager.h"
 #include "core1_metrics.h"
 
@@ -52,7 +50,9 @@ namespace esp32animations
     private:
         uint16_t m_number_of_leds;
         kivsee_render::HSV *m_leds_hsv;
-        NeoPixelBus<COLOR_ORDER, Neo800KbpsMethod> m_leds_rgb;
+        // The output buffer is FastLED's shared CRGB[] inside led_engine; we
+        // only fill it here. The FastLED ledTask calls FastLED.show() on its
+        // 16 ms tick (single owner of the RMT peripheral).
         float m_global_brightness;
         unsigned long m_last_metrics_report_time = 0;
         Core1Metrics m_metrics = {

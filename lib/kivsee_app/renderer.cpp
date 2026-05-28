@@ -1,4 +1,6 @@
 #include "renderer.h"
+#include <FastLED.h>
+#include "led_engine.h"
 
 namespace esp32animations
 {
@@ -7,10 +9,11 @@ namespace esp32animations
         : m_queueManager(queueManager),
           m_number_of_leds(number_of_leds),
           m_leds_hsv(new kivsee_render::HSV[number_of_leds]),
-          m_leds_rgb(number_of_leds, DATA_PIN),
           m_global_brightness(1.0)
     {
-        m_leds_rgb.Begin();
+        // FastLED owns the strip — its ledTask already initialised the
+        // controller via FastLED.addLeds() in led_engine_setup(). Nothing to
+        // do here; we just fill led_engine_anim_buffer() in show().
     }
 
     void Renderer::loop(unsigned long current_millis)
@@ -109,15 +112,22 @@ namespace esp32animations
 
     void Renderer::show()
     {
-        for (int i = 0; i < m_number_of_leds; i++)
+        // Write into FastLED's shared CRGB buffer (the 27-pixel animation
+        // slice exposed by led_engine). The FastLED ledTask calls
+        // FastLED.show() on its 16 ms tick — single RMT owner. Cap by both
+        // our HSV array length and the physical animation LED count.
+        CRGB *out = led_engine_anim_buffer();
+        const int hw_max = led_engine_num_anim_leds();
+        const int n = (m_number_of_leds < (uint16_t)hw_max) ? m_number_of_leds : hw_max;
+        for (int i = 0; i < n; i++)
         {
             const kivsee_render::HSV &hsvVal = m_leds_hsv[i];
             float normalizedBrightness = hsvVal.val * hsvVal.val * m_global_brightness;
-            HsbColor neoPixelColor(fmod(hsvVal.hue, 1.0f), hsvVal.sat, normalizedBrightness);
-            m_leds_rgb.SetPixelColor(i, neoPixelColor);
+            uint8_t h = (uint8_t)(fmodf(hsvVal.hue, 1.0f) * 255.0f);
+            uint8_t s = (uint8_t)(hsvVal.sat * 255.0f);
+            uint8_t v = (uint8_t)(normalizedBrightness * 255.0f);
+            out[i] = CHSV(h, s, v);
         }
-
-        m_leds_rgb.Show();
     }
 
     kivsee_render::HSV *Renderer::hsv_painting_array() const

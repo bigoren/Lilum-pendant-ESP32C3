@@ -32,6 +32,35 @@ bool led_engine_is_white_mode(void);
 /// animations are shown at their normal brightness.
 void led_engine_set_boot_blink(bool enable);
 
+#ifdef LILUM_KIVSEE
+// ── Kivsee env only ────────────────────────────────────────────────────────
+// The kivsee binary contains both Lilum-standalone mode (drives the patterns
+// below) and a networked kivsee mode (an external Renderer fills the LED
+// buffer directly). FastLED owns the RMT peripheral in both modes; the source
+// just selects whether the engine generates pattern frames or passes through
+// the externally-filled buffer.
+
+typedef enum {
+    LED_SRC_FASTLED = 0,  // run the gPatternsAuto/gPatternsManual selection
+    LED_SRC_KIVSEE  = 1,  // the kivsee Renderer has already written the buffer
+} led_src_t;
+
+/// Select which fills the animation buffer each frame. Default: LED_SRC_FASTLED.
+void      led_engine_set_source(led_src_t src);
+led_src_t led_engine_get_source(void);
+
+/// Animation-only LED buffer (27 pixels; status pixel 0 is excluded). The
+/// kivsee Renderer writes directly into this when source = LED_SRC_KIVSEE.
+struct CRGB;            // FastLED type, opaque to C consumers
+struct CRGB *led_engine_anim_buffer(void);
+int          led_engine_num_anim_leds(void);
+
+/// Connection-blink overlay (1 s on / 1 s off, period 2000 ms). Same
+/// mechanism as the boot-blink overlay, slower cadence — used by the kivsee
+/// connection wait to signal "trying to connect" without text.
+void led_engine_set_connecting_blink(bool enable);
+#endif  // LILUM_KIVSEE
+
 #ifdef __cplusplus
 }
 #endif
