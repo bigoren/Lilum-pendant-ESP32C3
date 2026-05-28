@@ -1,5 +1,8 @@
 #include "button_service.h"
 #include "led_engine.h"   // button drives the FastLED engine (both envs)
+#ifdef LILUM_KIVSEE
+#include "app_mode.h"     // triple-short-press switches runtime mode (kivsee env only)
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -59,6 +62,18 @@ static bool     longUsed     = false;  // long-press action already triggered
 static bool     waitingSecondPress  = false;  // got one short-press release, waiting for another
 static uint32_t tFirstRelease       = 0;      // when the first short press was released
 static bool     whiteWasActiveBeforePress = false; // track if white mode was on when press started
+
+#ifdef LILUM_KIVSEE
+// For triple-press detection (kivsee env only — used to switch runtime
+// mode standalone <-> kivsee). In this env, a second short press does NOT
+// fire handle_double_press() immediately; instead it enters "waiting third"
+// and defers the double action by DOUBLE_PRESS_GAP_MS so a possible third
+// short can promote to triple. Trade-off: ~300 ms delay on double-press
+// white-mode toggle in the kivsee env (acceptable; standalone env is
+// unchanged and still has zero-delay double-press).
+static bool     waitingThirdPress   = false;  // got a double-press release, waiting for a third
+static uint32_t tSecondRelease      = 0;      // when the second short press was released
+#endif
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,6 +144,25 @@ static void handle_double_press(void)
         enter_white_mode();
     }
 }
+
+#ifdef LILUM_KIVSEE
+static void handle_triple_press(void)
+{
+    // Triple-short-press toggles the runtime mode. From standalone we go
+    // in-place to kivsee (WiFi/MQTT bring-up; connecting-blink while it
+    // happens; no-hang fallbacks reboot us back to standalone if the
+    // network never comes up). From kivsee we persist STANDALONE and
+    // reboot — WiFi/MQTT/SPIFFS teardown on IDF 4.4.7 is fragile so a
+    // clean restart is the robust path.
+    if (app_mode_current() == APP_MODE_STANDALONE) {
+        ESP_LOGI(TAG, "triple press: STANDALONE -> KIVSEE (in-place)");
+        app_mode_switch_to_kivsee();
+    } else {
+        ESP_LOGI(TAG, "triple press: KIVSEE -> STANDALONE (reboot)");
+        app_mode_switch_to_standalone();   // does not return
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Brightness ramp (called continuously while button is held ≥ LONG_PRESS_MS)
@@ -215,8 +249,28 @@ static void button_poll(void)
 
                 if (!longUsed && duration >= DEBOUNCE_MS && duration < LONG_PRESS_MS) {
                     // Short press detected
+#ifdef LILUM_KIVSEE
+                    if (waitingThirdPress && (now - tSecondRelease) <= DOUBLE_PRESS_GAP_MS) {
+                        // Third short press in window — promote to triple.
+                        waitingThirdPress = false;
+                        handle_triple_press();
+                    } else if (waitingSecondPress && (now - tFirstRelease) <= DOUBLE_PRESS_GAP_MS) {
+                        // Second short press in window — defer the double
+                        // action by DOUBLE_PRESS_GAP_MS so a possible third
+                        // can promote to triple. The double fires on
+                        // timeout below if no third arrives.
+                        waitingSecondPress = false;
+                        waitingThirdPress  = true;
+                        tSecondRelease     = now;
+                    } else {
+                        // Could be first of a multi-press — wait to see
+                        waitingSecondPress = true;
+                        tFirstRelease      = now;
+                    }
+#else
                     if (waitingSecondPress && (now - tFirstRelease) <= DOUBLE_PRESS_GAP_MS) {
-                        // Second press of a double-press
+                        // Second press of a double-press — fire immediately
+                        // (no triple-press in the standalone env).
                         waitingSecondPress = false;
                         handle_double_press();
                     } else {
@@ -224,6 +278,7 @@ static void button_poll(void)
                         waitingSecondPress = true;
                         tFirstRelease      = now;
                     }
+#endif
                 }
                 // If long press was used, nothing extra happens on release.
 
@@ -232,11 +287,19 @@ static void button_poll(void)
         }
     }
 
-    // --- Double-press timeout: no second press arrived → treat as single short press ---
+    // --- Single-press timeout: no second press arrived → treat as single short press ---
     if (waitingSecondPress && (now - tFirstRelease) > DOUBLE_PRESS_GAP_MS) {
         waitingSecondPress = false;
         handle_single_short_press();
     }
+
+#ifdef LILUM_KIVSEE
+    // --- Double-press timeout: no third press arrived → fire the deferred double ---
+    if (waitingThirdPress && (now - tSecondRelease) > DOUBLE_PRESS_GAP_MS) {
+        waitingThirdPress = false;
+        handle_double_press();
+    }
+#endif
 
     // --- Long-press brightness ramp while held ---
     if (pressActive && !stable) {
