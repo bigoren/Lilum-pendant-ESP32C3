@@ -37,9 +37,10 @@ public:
         char willMsg[128];
         serializeJson(alive_will_doc, willMsg);
 
-        client.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT); // Broker IP is defined in platformio.ini
+        client.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT);
         client.setCallback(std::bind(&MosquittoManager::mqtt_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, thing_name));
-        ESP_LOGI(MQTT_TAG, "connecting to mqtt broker");
+        ESP_LOGI(MQTT_TAG, "connecting to mqtt broker %s:%d as '%s'",
+                 MQTT_BROKER_IP, MQTT_BROKER_PORT, thing_name);
         if (client.connect(thing_name, statusTopic, 1, true, willMsg))
         {
             ESP_LOGI(MQTT_TAG, "connected to message broker");

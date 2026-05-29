@@ -12,6 +12,7 @@
 #include <SPIFFS.h>
 #include <cstring>
 #include "esp_log.h"
+#include "esp_wifi.h"
 #include "led_engine.h"
 #include "app_mode.h"
 
@@ -187,7 +188,11 @@ void kivsee_app_loop(void)
   if (wifi_connected && !wifi_ever_connected) {
     wifi_ever_connected = true;
     led_engine_set_connecting_blink(false);
-    ESP_LOGI(TAG, "WiFi connected");
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    ESP_LOGI(TAG, "WiFi connected  IP=%s  GW=%s  DNS=%s",
+             WiFi.localIP().toString().c_str(),
+             WiFi.gatewayIP().toString().c_str(),
+             WiFi.dnsIP().toString().c_str());
   }
 
   if (!wifi_ever_connected &&
