@@ -62,6 +62,9 @@ pio run -e esp32c3_kivsee -t upload -t monitor
 
 # Upload the SPIFFS image (kivsee env only, holds thing_info)
 pio run -e esp32c3_kivsee -t uploadfs
+
+# Flash over WiFi instead of USB (kivsee mode only — see OTA updates below)
+LILUM_OTA_HOST=lilum.local pio run -e esp32c3_kivsee_ota -t upload
 ```
 
 Serial monitor runs at **115200 baud** with the ESP32 exception decoder enabled.
@@ -166,6 +169,21 @@ unrecoverable spin. Two failure paths reboot back into standalone:
 3. **Server IPs** — set in `[env:esp32c3_kivsee]` build flags in
    [platformio.ini](platformio.ini) (`MQTT_BROKER_IP`, `TIME_SERVER_IP`,
    `LED_OBJECT_SERVICE_IP`, `LED_SEQ_SERVICE_IP`).
+
+#### OTA updates (WiFi flashing)
+
+Kivsee mode (the only WiFi mode) can be flashed over the air. The
+`esp32c3_kivsee_ota` env builds the same firmware as `esp32c3_kivsee` but
+uploads via `espota`. Set the target per-device with `LILUM_OTA_HOST` (the
+device's `thing_info` name, advertised as `<name>.local`; a bare IP also works):
+
+```bash
+LILUM_OTA_HOST=lilum.local pio run -e esp32c3_kivsee_ota -t upload
+```
+
+> First flash must be over USB (`esp32c3_kivsee`) — pre-OTA-partition images
+> won't accept OTA. OTA flashes the app only; `thing_info` still uses `uploadfs`.
+> No OTA password is set, so any LAN host can flash the device.
 
 ---
 
@@ -343,10 +361,10 @@ components/
   battery_service/            IP5306 PMIC + NTC temp + power-on gate             [ESP-IDF]
   button_service/             button UX (mode/pattern/brightness/white/triple)   [ESP-IDF]
   orchestra_ble/              NimBLE master/follower animation sync              [custom env]
-platformio.ini                build envs: esp32c3_custom (BLE), esp32c3_kivsee (WiFi+standalone)
+platformio.ini                build envs: esp32c3_custom (BLE), esp32c3_kivsee (WiFi+standalone), esp32c3_kivsee_ota (WiFi flash)
 sdkconfig.defaults            source-of-truth IDF config (shared)
 sdkconfig.kivsee.defaults     per-env override: disables BLE in the kivsee env
-partitions_kivsee.csv         larger app slot + SPIFFS for the kivsee binary
+partitions_kivsee.csv         dual OTA app slots + SPIFFS for the kivsee binary
 ```
 
 ### Boot sequence
