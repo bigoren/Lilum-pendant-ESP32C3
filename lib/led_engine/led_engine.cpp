@@ -732,11 +732,10 @@ void led_engine_loop() {
         }
     }
 #ifdef LILUM_KIVSEE
+    // WiFi connecting: blink status pixel blue — distinct from the red charge states.
     if (g_connecting_blink_active) {
         bool on = ((now / (CONNECTING_BLINK_PERIOD_MS / 2)) & 1) == 0;
-        if (!on) {
-            FastLED.setBrightness(0);
-        }
+        leds[STATUS_LED_INDEX] = on ? CRGB::Blue : CRGB::Black;
     }
 #endif
 
