@@ -112,7 +112,8 @@ namespace esp32animations
 
     void Renderer::show()
     {
-        // Fill led_engine's shared buffer; the ledTask calls FastLED.show().
+        // Write into the shadow buffer; led_engine_anim_commit() marks it ready
+        // so ledTask snaps it atomically at the start of the next LED frame.
         CRGB *out = led_engine_anim_buffer();
         const int hw_max = led_engine_num_anim_leds();
         const int n = (m_number_of_leds < (uint16_t)hw_max) ? m_number_of_leds : hw_max;
@@ -125,6 +126,7 @@ namespace esp32animations
             uint8_t v = (uint8_t)(normalizedBrightness * 255.0f);
             out[i] = CHSV(h, s, v);
         }
+        led_engine_anim_commit();
     }
 
     kivsee_render::HSV *Renderer::hsv_painting_array() const

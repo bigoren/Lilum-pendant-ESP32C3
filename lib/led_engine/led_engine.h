@@ -45,6 +45,7 @@ led_src_t led_engine_get_source(void);
 
 struct CRGB;
 struct CRGB *led_engine_anim_buffer(void);
+void         led_engine_anim_commit(void);
 int          led_engine_num_anim_leds(void);
 
 // 1 s on / 1 s off brightness gating; signals "trying to connect" visually.

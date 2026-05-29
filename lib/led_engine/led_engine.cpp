@@ -37,6 +37,17 @@ CRGB leds[TOTAL_LEDS];
 // Convenience pointer into the animation portion of the strip
 static CRGB *anim = &leds[ANIM_LED_START];
 
+#ifdef LILUM_KIVSEE
+// Double-buffer: renderer always writes to s_render_buf, LED task always reads
+// from s_display_buf.  led_engine_anim_commit() swaps the pointers atomically so
+// the two tasks never touch the same buffer simultaneously.
+static CRGB  s_buf_a[NUM_ANIM_LEDS];
+static CRGB  s_buf_b[NUM_ANIM_LEDS];
+static CRGB *volatile s_render_buf  = s_buf_a;   // renderer writes here
+static CRGB *volatile s_display_buf = s_buf_b;   // LED task reads here
+static volatile bool  s_anim_shadow_ready = false;
+#endif
+
 // ---------------------------------------------------------------------------
 // Brightness
 // ---------------------------------------------------------------------------
@@ -624,7 +635,13 @@ void led_engine_loop() {
     if (s_led_power_on) {
 #ifdef LILUM_KIVSEE
         if (g_led_source == LED_SRC_KIVSEE) {
-            // Buffer already filled by external Renderer; white-mode still wins.
+            // Snap display buffer only when renderer committed a complete frame.
+            // s_display_buf is the renderer's previous render_buf — renderer is
+            // now writing to the old display buf, so these two never overlap.
+            if (s_anim_shadow_ready) {
+                memcpy(anim, s_display_buf, sizeof(CRGB) * NUM_ANIM_LEDS);
+                s_anim_shadow_ready = false;
+            }
             if (g_white_mode) {
                 fill_solid(anim, NUM_ANIM_LEDS, CRGB::White);
                 FastLED.setBrightness(LED_BRIGHTNESS_WHITE);
@@ -756,7 +773,16 @@ led_src_t led_engine_get_source(void) {
 }
 
 struct CRGB *led_engine_anim_buffer(void) {
-    return anim;
+    return s_render_buf;
+}
+
+void led_engine_anim_commit(void) {
+    // Swap render and display pointers so the LED task reads the just-completed
+    // frame while the renderer writes into the (now-free) old display buffer.
+    CRGB *tmp    = s_display_buf;
+    s_display_buf = s_render_buf;
+    s_render_buf  = tmp;
+    s_anim_shadow_ready = true;
 }
 
 int led_engine_num_anim_leds(void) {
