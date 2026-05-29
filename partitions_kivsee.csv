@@ -1,14 +1,21 @@
 # Partition table for the esp32c3_kivsee build (4 MB flash).
-# Single-app layout (no OTA) to maximize the app slot for the WiFi + MQTT +
-# kivsee-render stack, plus a SPIFFS data partition for thing_info and the
-# cached segment-config (objects-config). OTA can be added later by switching
-# to two ota_0/ota_1 slots if the merged app stays under ~1.5 MB.
+# OTA-enabled: two equal app slots + 512 KB SPIFFS. No wasted space beyond the
+# 56 KB alignment gap that ESP32 requires before the first app partition.
+#
+# Current firmware: ~1.0 MB → each OTA slot has ~640 KB headroom for growth.
 #
 # Name,     Type, SubType,  Offset,    Size
 nvs,        data, nvs,      0x9000,    0x6000
-phy_init,   data, phy,      0xf000,    0x1000
-factory,    app,  factory,  0x10000,   0x2A0000
-spiffs,     data, spiffs,   0x2B0000,  0x140000
-# factory: 0x2A0000 = 2.625 MB app slot
-# spiffs:  0x140000 = 1.25 MB data
-# total used: 0x10000 + 0x2A0000 + 0x140000 = 0x3F0000 (~3.94 MB of 4 MB)
+otadata,    data, ota,      0xf000,    0x2000
+phy_init,   data, phy,      0x11000,   0x1000
+# [56 KB alignment gap: 0x12000–0x20000, required for app partition alignment]
+ota_0,      app,  ota_0,    0x20000,   0x1B0000
+ota_1,      app,  ota_1,    0x1D0000,  0x1B0000
+spiffs,     data, spiffs,   0x380000,  0x80000
+# nvs:      24 KB   — WiFi creds, app_mode, NVS key-value store
+# otadata:   8 KB   — OTA active-slot selector (written by esp_ota_set_boot_partition)
+# phy_init:  4 KB   — RF/PHY calibration data
+# ota_0:  1.6875 MB — active app slot (flashed by PlatformIO upload / idf.py flash)
+# ota_1:  1.6875 MB — OTA target slot (written by OTA update at runtime)
+# spiffs:  512 KB   — thing_info, segment-config cache, battery drain log
+# Total: 0x380000 + 0x80000 = 0x400000 (4 MB)

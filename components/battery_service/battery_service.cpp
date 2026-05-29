@@ -9,6 +9,9 @@
 #include "esp_timer.h"
 #include "rom/ets_sys.h"
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "BAT";
 
@@ -85,7 +88,7 @@ static const char *TAG = "BAT";
 #define NTC_ADC_WIDTH       ADC_WIDTH_BIT_12
 
 // ── Periodic task ──────────────────────────────────────────
-#define BAT_POLL_MS         2000     // 2-second poll interval
+#define BAT_POLL_MS         1000     // 1-second poll interval
 #define BAT_TASK_STACK      3072
 
 // ── Shared state ───────────────────────────────────────────
@@ -99,6 +102,21 @@ static volatile bool    s_key_long      = false;
 static volatile bool    s_key_double    = false;
 static volatile bool    s_chg_inhibited = false;    // true when charging disabled due to temp
 static volatile battery_charge_status_t s_charge_status = BAT_CHG_NOT_CHARGING;
+
+// ── Drain log ──────────────────────────────────────────────
+#define BAT_DRAIN_LOG_PATH     "/spiffs/bat_drain.csv"
+#define BAT_DRAIN_MAX_SESSIONS 10
+#define BAT_DRAIN_BUF_SIZE     2048   // 10 sessions × ~5 entries × ~20 bytes = <1 KB typical
+
+// Debounce: require 3 consecutive identical readings before logging a transition.
+// Prevents false entries when the IP5306 oscillates at a level boundary.
+#define BAT_DRAIN_DEBOUNCE     3
+
+static int8_t s_drain_candidate     = -1;  // level being held for debounce
+static int    s_drain_debounce_cnt  =  0;  // consecutive polls at s_drain_candidate
+static int8_t s_drain_last_logged   = -1;  // last level written to the log
+
+static void bat_drain_append(int8_t level);  // defined after battery_task
 
 // ── ADC handle ─────────────────────────────────────────────
 static esp_adc_cal_characteristics_t s_adc_chars;
@@ -332,6 +350,25 @@ static void battery_task(void *arg)
         s_charging    = ip5306_is_charging();
         s_charge_full = ip5306_is_full();
 
+        // ── Drain log debounce ──
+        // Require BAT_DRAIN_DEBOUNCE consecutive polls at the same level before
+        // logging, to avoid spurious entries when the IP5306 oscillates at a
+        // level boundary.  Logs both drops and rises (charging artefacts visible).
+        if (s_bat_level >= 0) {
+            if (s_bat_level == s_drain_candidate) {
+                if (s_drain_debounce_cnt < BAT_DRAIN_DEBOUNCE)
+                    s_drain_debounce_cnt++;
+            } else {
+                s_drain_candidate    = s_bat_level;
+                s_drain_debounce_cnt = 1;
+            }
+            if (s_drain_debounce_cnt >= BAT_DRAIN_DEBOUNCE &&
+                s_drain_candidate != s_drain_last_logged) {
+                bat_drain_append(s_drain_candidate);
+                s_drain_last_logged = s_drain_candidate;
+            }
+        }
+
         // ── Enforce 0.25 A charging current ──
         ip5306_set_charge_current();
 
@@ -403,6 +440,100 @@ static void battery_task(void *arg)
 
         vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(BAT_POLL_MS));
     }
+}
+
+// ── Battery drain log helpers ──────────────────────────────
+
+static void bat_drain_append(int8_t level)
+{
+    FILE *f = fopen(BAT_DRAIN_LOG_PATH, "a");
+    if (!f) return;
+    uint32_t uptime_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
+    fprintf(f, "%lu,%d\n", (unsigned long)uptime_s, (int)level);
+    fclose(f);
+    ESP_LOGI(TAG, "DRAIN LOG: +%lu s → %d%%", (unsigned long)uptime_s, (int)level);
+}
+
+void battery_drain_log_dump(void)
+{
+    FILE *f = fopen(BAT_DRAIN_LOG_PATH, "r");
+    if (!f) {
+        ESP_LOGI(TAG, "=== Battery drain log: no file ===");
+        return;
+    }
+    ESP_LOGI(TAG, "=== Battery drain log (last %d sessions) ===", BAT_DRAIN_MAX_SESSIONS);
+    char line[48];
+    int session = 0;
+    while (fgets(line, sizeof(line), f)) {
+        int ll = (int)strlen(line);
+        if (ll > 0 && line[ll - 1] == '\n') line[ll - 1] = '\0';
+        if (strcmp(line, "BOOT") == 0) {
+            session++;
+            ESP_LOGI(TAG, "  -- session %d --", session);
+        } else {
+            ESP_LOGI(TAG, "  %s s", line);
+        }
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "=== End of drain log ===");
+}
+
+void battery_drain_log_boot(void)
+{
+    // Read existing file content.
+    char *buf = (char *)malloc(BAT_DRAIN_BUF_SIZE);
+    if (!buf) {
+        ESP_LOGE(TAG, "drain log boot: malloc failed");
+        return;
+    }
+
+    int len = 0;
+    FILE *f = fopen(BAT_DRAIN_LOG_PATH, "r");
+    if (f) {
+        len = (int)fread(buf, 1, BAT_DRAIN_BUF_SIZE - 1, f);
+        if (len < 0) len = 0;
+        fclose(f);
+    }
+    buf[len] = '\0';
+
+    // Locate each BOOT line (at start of file or after '\n').
+    const char *boot_pos[BAT_DRAIN_MAX_SESSIONS + 2];
+    int boot_count = 0;
+    if (len >= 5 && strncmp(buf, "BOOT\n", 5) == 0) {
+        boot_pos[boot_count++] = buf;
+    }
+    for (int i = 0; i < len; i++) {
+        if (buf[i] == '\n' && strncmp(buf + i + 1, "BOOT\n", 5) == 0) {
+            if (boot_count < (int)(sizeof(boot_pos) / sizeof(boot_pos[0]))) {
+                boot_pos[boot_count++] = buf + i + 1;
+            }
+        }
+    }
+
+    // Trim: keep only the last (MAX_SESSIONS - 1) existing sessions so that
+    // after appending the new BOOT we stay at MAX_SESSIONS total.
+    const char *keep_from = buf;
+    if (boot_count >= BAT_DRAIN_MAX_SESSIONS) {
+        int drop = boot_count - (BAT_DRAIN_MAX_SESSIONS - 1);
+        keep_from = boot_pos[drop];
+    }
+
+    f = fopen(BAT_DRAIN_LOG_PATH, "w");
+    if (f) {
+        int keep_len = (int)((buf + len) - keep_from);
+        if (keep_len > 0) fwrite(keep_from, 1, keep_len, f);
+        fputs("BOOT\n", f);
+        fclose(f);
+    } else {
+        ESP_LOGE(TAG, "drain log boot: can't open for write");
+    }
+
+    free(buf);
+
+    // Reset debounce for the new session.
+    s_drain_candidate    = -1;
+    s_drain_debounce_cnt =  0;
+    s_drain_last_logged  = -1;
 }
 
 // ── Public API ─────────────────────────────────────────────

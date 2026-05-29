@@ -79,6 +79,21 @@ bool battery_key_long_press(void);
 /** Returns true exactly once after a double-click is detected. */
 bool battery_key_double_click(void);
 
+/**
+ * Print the battery drain log (all stored sessions) to the ESP log.
+ * Call at boot before battery_service_start() so the previous session's
+ * data is visible on the serial monitor when USB is reconnected.
+ * Safe to call even if SPIFFS is not mounted (logs a warning and returns).
+ */
+void battery_drain_log_dump(void);
+
+/**
+ * Write a BOOT marker for the current session and trim the log to the last
+ * BAT_DRAIN_MAX_SESSIONS sessions.  Call at boot after battery_drain_log_dump()
+ * and before battery_service_start().
+ */
+void battery_drain_log_boot(void);
+
 #ifdef __cplusplus
 }
 #endif
