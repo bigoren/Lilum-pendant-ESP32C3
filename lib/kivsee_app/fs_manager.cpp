@@ -33,6 +33,7 @@ bool FsManager::ReadThingKey(char *destBuffer, int bufferLength) {
       return false;
     }
 
+    if (numOfChars > 0 && destBuffer[numOfChars - 1] == '\r') numOfChars--;
     destBuffer[numOfChars] = '\0';
     destBuffer[bufferLength - 1] = '\0';
 
@@ -57,6 +58,7 @@ bool FsManager::ReadThingName(char *destBuffer, int bufferLength)
       return false;
     }
 
+    if (numOfChars > 0 && destBuffer[numOfChars - 1] == '\r') numOfChars--;
     destBuffer[numOfChars] = '\0';
     destBuffer[bufferLength - 1] = '\0';
 
