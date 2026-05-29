@@ -6,7 +6,7 @@
 
 // Print interval in milliseconds.
 // Examples: 1000 = 1 s, 500 = 0.5 s, 100 = 0.1 s
-static constexpr uint32_t LOG_INTERVAL_MS = 1000;
+static constexpr uint32_t LOG_INTERVAL_MS = 2000;
 
 // Enable / disable individual sections of the print line.
 static constexpr bool LOG_ENABLE_MAIN = false;   // Role & animation

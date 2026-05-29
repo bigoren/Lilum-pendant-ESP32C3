@@ -167,11 +167,12 @@ void kivsee_app_setup(void)
   ESP_LOGI(TAG, "kivsee_app_setup: complete");
 }
 
-// dBm thresholds: > -60 good, -60..-75 average, < -75 poor.
+// dBm thresholds: >=-55 excellent, -55..-67 good, -67..-75 fair, <-75 poor.
 static const char *rssi_quality(long rssi)
 {
-  if (rssi >= -60) return "good";
-  if (rssi >= -75) return "average";
+  if (rssi >= -55) return "excellent";
+  if (rssi >= -67) return "good";
+  if (rssi >= -75) return "fair";
   return "poor";
 }
 
