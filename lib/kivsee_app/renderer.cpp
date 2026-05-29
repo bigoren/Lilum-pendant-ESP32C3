@@ -1,6 +1,9 @@
 #include "renderer.h"
 #include <FastLED.h>
+#include "esp_log.h"
 #include "led_engine.h"
+
+static const char *TAG = "KIVSEE_RND";
 
 namespace esp32animations
 {
@@ -52,9 +55,8 @@ namespace esp32animations
         RuntimeAnimation new_runtime_animation;
         if (xQueueReceive(m_queueManager.runtime_animation_queue, &new_runtime_animation, 0) == pdTRUE)
         {
-            Serial.print(F("[Renderer] received new animations with "));
-            Serial.print(new_runtime_animation.animation ? new_runtime_animation.animation->effects.size() : 0);
-            Serial.println(F(" effects"));
+            ESP_LOGI(TAG, "received new animation with %u effects",
+                     (unsigned)(new_runtime_animation.animation ? new_runtime_animation.animation->effects.size() : 0));
             const bool animationChanged = runtime_animation.animation != new_runtime_animation.animation;
             if (animationChanged)
             {

@@ -5,7 +5,10 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include "WiFiClient.h"
+#include "esp_log.h"
 #include <functional>
+
+static const char *MQTT_TAG = "KIVSEE_MQTT";
 
 #ifndef MQTT_BROKER_PORT
 #define MQTT_BROKER_PORT 1883
@@ -36,10 +39,10 @@ public:
 
         client.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT); // Broker IP is defined in platformio.ini
         client.setCallback(std::bind(&MosquittoManager::mqtt_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, thing_name));
-        Serial.println("connecting to mqtt");
+        ESP_LOGI(MQTT_TAG, "connecting to mqtt broker");
         if (client.connect(thing_name, statusTopic, 1, true, willMsg))
         {
-            Serial.println("connected to message broker");
+            ESP_LOGI(MQTT_TAG, "connected to message broker");
 
             // publish alive message
             StaticJsonDocument<128> alive_status_doc;
@@ -56,8 +59,7 @@ public:
         }
         else
         {
-            Serial.print("mqtt connect failed. error state:");
-            Serial.println(client.state());
+            ESP_LOGW(MQTT_TAG, "mqtt connect failed. error state: %d", client.state());
         }
     }
 
@@ -84,16 +86,13 @@ private:
 
     void mqtt_callback(char *topic, uint8_t* payload, unsigned int length, const char *thing_name)
     {
-        Serial.print("Message arrived, ");
-        Serial.print(length);
-        Serial.print(" [");
-        Serial.print(topic);
-        Serial.print("] ");
-        for (int i = 0; i < length; i++)
-        {
-            Serial.print((char)payload[i]);
-        }
-        Serial.println();
+        // Log topic + payload (truncate payload to fit a reasonable buffer).
+        char buf[128];
+        unsigned int copyLen = length < sizeof(buf) - 1 ? length : sizeof(buf) - 1;
+        memcpy(buf, payload, copyLen);
+        buf[copyLen] = '\0';
+        ESP_LOGI(MQTT_TAG, "msg [%s] (%u bytes): %s%s",
+                 topic, length, buf, copyLen < length ? "..." : "");
 
         if(strncmp("obj/", topic, 4) == 0) {
             callback->NewConfigGuidReceived(payload, length, thing_name);
@@ -102,7 +101,7 @@ private:
         } else if(strncmp(brightnessTopic, topic, sizeof(brightnessTopic) + 1) == 0) {
             callback->NewGlobalBrightnessReceived(payload,length);
         } else {
-            Serial.println("different topic?");
+            ESP_LOGW(MQTT_TAG, "unknown topic: %s", topic);
         }
     }
 };

@@ -2,6 +2,9 @@
 #include <time_manager.h>
 
 #include <Arduino.h>
+#include "esp_log.h"
+
+static const char *TAG = "KIVSEE_TIME";
 
 TimeManager::TimeManager(QueueHandle_t epoch_time_update_queue)
     : m_epoch_time_update_queue(epoch_time_update_queue)
@@ -11,8 +14,7 @@ TimeManager::TimeManager(QueueHandle_t epoch_time_update_queue)
 
 void TimeManager::begin() {
     IPAddress ntpServerIp;
-    Serial.print("Time sync server IP: ");
-    Serial.println(TIME_SERVER_IP);
+    ESP_LOGI(TAG, "time sync server: %s", TIME_SERVER_IP);
     ntpServerIp.fromString(TIME_SERVER_IP);
     m_timesync.setup(ntpServerIp, 12321);
 }
@@ -23,11 +25,11 @@ void TimeManager::loop()
     m_timesync.loop(&isTimeChanged, &isFirstClockUpdate);
     if (isFirstClockUpdate)
     {
-        Serial.println("TIME IS NOW VALID. the esp clock was not valid and now it is");
+        ESP_LOGI(TAG, "esp clock now valid (first sync)");
     }
     else if (isTimeChanged)
     {
-        Serial.println("TIME CHANGED. new synced clock is available to the esp");
+        ESP_LOGI(TAG, "esp clock re-synced");
     }
 
     if (isTimeChanged || isFirstClockUpdate)

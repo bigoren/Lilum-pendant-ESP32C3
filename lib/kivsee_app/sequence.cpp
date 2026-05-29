@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <pb_decode.h>
 #include <ArduinoJson.h>
+#include "esp_log.h"
 
 #include <animation.h>
 
@@ -12,6 +13,8 @@
 #include "protobuf_infra.h"
 #include "segment_store.h"
 #include "runtime_animation.h"
+
+static const char *TAG = "KIVSEE_SEQ";
 
 SequenceManager::SequenceManager(QueueHandle_t runtime_animation_queue, QueueHandle_t runtime_animation_delete_queue)
         :
@@ -35,17 +38,16 @@ void SequenceManager::loop()
     int uriLen = snprintf(uri, sizeof(uri), "/triggers/%s/objects/%s/guid/%lu", triggerName, thing_name, guid);
     if (uriLen < 0 || uriLen >= sizeof(uri))
     {
-        Serial.println("cannot format seq uri");
+        ESP_LOGE(TAG, "cannot format seq uri");
         return nullptr;
     }
 
-    Serial.print(F("fetching sequence from uri: "));
-    Serial.println(uri);
+    ESP_LOGI(TAG, "fetching sequence from uri: %s", uri);
 
     uint16_t port = (uint16_t)strtoul(LED_SEQ_SERVICE_PORT, nullptr, 10);
     if (port == 0)
     {
-        Serial.println(F("could not parse sequence service port"));
+        ESP_LOGE(TAG, "could not parse sequence service port");
         return nullptr;
     }
 
@@ -57,15 +59,14 @@ void SequenceManager::loop()
     int httpResponseCode = http.GET();
     if (httpResponseCode <= 0)
     {
-        Serial.print(F("sequence service GET error code: "));
-        Serial.println(httpResponseCode);
+        ESP_LOGE(TAG, "sequence service GET error code: %d", httpResponseCode);
         http.end();
         return nullptr;
     }
 
     if (httpResponseCode >= 400)
     {
-        Serial.println(F("failed to GET led sequence from service"));
+        ESP_LOGE(TAG, "failed to GET led sequence from service (HTTP %d)", httpResponseCode);
         http.end();
         return nullptr;
     }
@@ -73,7 +74,7 @@ void SequenceManager::loop()
     int payloadSize = http.getSize();
     if (payloadSize < 0)
     {
-        Serial.println(F("failed to GET led sequence payload in http response"));
+        ESP_LOGE(TAG, "failed to GET led sequence payload in http response");
         http.end();
         return nullptr;
     }
@@ -86,14 +87,13 @@ void SequenceManager::loop()
     void *decodeArgs = &args;
 
     uint32_t preDecodeHeapSize = esp_get_free_heap_size();
-    Serial.print(F("decoding trigger sequence. heap size: "));
-    Serial.println(preDecodeHeapSize);
+    ESP_LOGI(TAG, "decoding trigger sequence. heap size: %u", (unsigned)preDecodeHeapSize);
 
     bool decodeSuccess = kivsee_render::DecodeAnimationFromPbStream(&nanopbStream, nullptr, &decodeArgs);
     if (!decodeSuccess)
     {
-        Serial.print(F("failed to decode sequence proto. error: "));
-        Serial.println(nanopbStream.errmsg);
+        ESP_LOGE(TAG, "failed to decode sequence proto. error: %s",
+                 nanopbStream.errmsg ? nanopbStream.errmsg : "(none)");
         http.end();
         return nullptr;
     }
@@ -101,11 +101,8 @@ void SequenceManager::loop()
     uint32_t heapUsed = preDecodeHeapSize - esp_get_free_heap_size();
 
     ::kivsee_render::Animation *animation = (::kivsee_render::Animation *)decodeArgs;
-    Serial.print(F("successfully decoded sequence from protobuf. found "));
-    Serial.print(animation->effects.size());
-    Serial.print(F(" effects consuming "));
-    Serial.print(heapUsed);
-    Serial.println(F(" bytes."));
+    ESP_LOGI(TAG, "decoded sequence: %u effects, %u bytes",
+             (unsigned)animation->effects.size(), (unsigned)heapUsed);
 
     http.end();
 
@@ -126,7 +123,7 @@ void SequenceManager::loop()
     bool sameGuid = (guid != 0) && (m_lastTriggerGuid == guid);
     if (sameTrigger && sameGuid && m_lastDecodedAnimation)
     {
-        Serial.println(F("got the same trigger and guid again"));
+        ESP_LOGI(TAG, "got the same trigger and guid again");
         return m_lastDecodedAnimation;
     }
 
@@ -142,8 +139,7 @@ void SequenceManager::loop()
         m_lastTriggerGuid = guid;
         m_lastDecodedAnimation = animation;
     }
-    Serial.print(F("free heap after http: "));
-    Serial.println(esp_get_free_heap_size());
+    ESP_LOGI(TAG, "free heap after http: %u", (unsigned)esp_get_free_heap_size());
     return animation;
 }
 
@@ -194,15 +190,14 @@ void SequenceManager::handleTriggerInvokedMessage(const byte *payload, unsigned 
 
     if (error)
     {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.f_str());
+        ESP_LOGE(TAG, "deserializeJson() failed: %s", error.f_str());
         return;
     }
 
     const char *triggerName = doc["trigger_name"].as<const char *>();
     if (!triggerName)
     {
-        Serial.println("no active trigger");
+        ESP_LOGI(TAG, "no active trigger");
         sendEmptyAnimationToRenderer();
         return;
     }
@@ -210,9 +205,8 @@ void SequenceManager::handleTriggerInvokedMessage(const byte *payload, unsigned 
     uint32_t guid = doc["guid"].as<uint32_t>();
     uint64_t startTimeMsSinceEpoch = doc["start_time_ms_since_epoch"].as<uint64_t>();
 
-    char buf[200];
-    snprintf(buf, sizeof(buf), "got trigger: %s. guid: %d, start time: %lld", triggerName ? triggerName : "NONE", guid, startTimeMsSinceEpoch);
-    Serial.println(buf);
+    ESP_LOGI(TAG, "got trigger: %s. guid: %u, start time: %lld",
+             triggerName, (unsigned)guid, (long long)startTimeMsSinceEpoch);
 
     ::kivsee_render::Animation *animation = loadSequence(triggerName, guid, thing_name);
     esp32animations::RuntimeAnimation new_timed_animation = {

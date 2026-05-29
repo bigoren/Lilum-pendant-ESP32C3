@@ -2,7 +2,9 @@
 
 #define ARDUINOJSON_USE_LONG_LONG 1
 #include <ArduinoJson.h>
+#include "esp_log.h"
 
+static const char *TAG = "KIVSEE_BR";
 
 bool handleGlobalBrightnessMessage(const byte *payload, unsigned int length, float *new_global_brightness)
 {
@@ -11,8 +13,7 @@ bool handleGlobalBrightnessMessage(const byte *payload, unsigned int length, flo
 
     if (error)
     {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.f_str());
+        ESP_LOGE(TAG, "deserializeJson() failed: %s", error.f_str());
         return false;
     }
 
@@ -20,13 +21,9 @@ bool handleGlobalBrightnessMessage(const byte *payload, unsigned int length, flo
 
     if ((*new_global_brightness < 0.0) || (*new_global_brightness > 1.0))
     {
-        Serial.print(F("Recieved brightness is outside range 0.0 to 1.0: "));
-        Serial.println(*new_global_brightness);
+        ESP_LOGW(TAG, "brightness out of range 0..1: %.3f", *new_global_brightness);
         return false;
     }
 
-    // Serial.print(F("Recieved new global brightness value: "));
-    // Serial.println(*new_global_brightness);
     return true;
-
 }

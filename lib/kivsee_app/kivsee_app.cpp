@@ -57,6 +57,7 @@ public:
 
   void TriggerInvoked(const byte *payload, unsigned int length)
   {
+    ESP_LOGI(TAG, "TriggerInvoked: %u bytes queued for processing", length);
     // Copy into the trigger queue; the HTTP/decode work happens in the loop,
     // not inside the MQTT callback (which would block the mqtt loop).
     QueueManager::TriggerMessage msg;

@@ -3,10 +3,13 @@
 #include <SPIFFS.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include "esp_log.h"
 #include "protobuf_infra.h"
 #include "hsv.h"
 #include <kivsee/proto/render/v1/segments.pb.h>
 #include "secrets.h"
+
+static const char *TAG = "KIVSEE_SEG";
 
 #ifndef LED_OBJECT_SERVICE_PORT
 #define LED_OBJECT_SERVICE_PORT 80
@@ -35,7 +38,7 @@ void initSegmentStore(kivsee_render::HSV *leds, uint16_t number_of_leds)
     if (!file || file.available() == 0)
     {
         segments_map = initDefaultSegmentStore(leds, number_of_leds);
-        Serial.println("Failed to open objects config file for reading");
+        ESP_LOGW(TAG, "no objects-config on FS; using empty default segment store");
         return;
     }
 
@@ -49,18 +52,15 @@ void initSegmentStore(kivsee_render::HSV *leds, uint16_t number_of_leds)
     bool decodeSuccess = ::kivsee_render::segments::DecodeSegmentsMapFromPbStream(&pbInputStream, nullptr, &arg);
     if (decodeSuccess)
     {
-        Serial.println("SUCCESS, segment store initialized");
-        Serial.print("guid: ");
-        Serial.println(segments_map->guid);
-        Serial.print("number of pixels: ");
-        Serial.println(segments_map->number_of_pixels);
-        Serial.print("number of segments: ");
-        Serial.println(segments_map->segments.size());
+        ESP_LOGI(TAG, "segment store initialized: guid=%u pixels=%u segments=%u",
+                 (unsigned)segments_map->guid,
+                 (unsigned)segments_map->number_of_pixels,
+                 (unsigned)segments_map->segments.size());
     }
     else
     {
-        Serial.println("Failed to initialize segment store");
-        Serial.println(pbInputStream.errmsg);
+        ESP_LOGE(TAG, "failed to decode segment store: %s",
+                 pbInputStream.errmsg ? pbInputStream.errmsg : "(none)");
         segments_map = initDefaultSegmentStore(leds, number_of_leds);
     }
     file.close();
@@ -73,15 +73,15 @@ void handleSegmentsGuidMessage(const byte *payload, unsigned int length, const c
 
     if (error)
     {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.f_str());
+        ESP_LOGE(TAG, "deserializeJson() failed: %s", error.f_str());
         return;
     }
 
     uint32_t currentGuid = doc["guid"].as<uint32_t>();
     if (currentGuid != segments_map->guid)
     {
-        Serial.println("got indication that config changed by guid");
+        ESP_LOGI(TAG, "config guid changed (%u -> %u); refetching",
+                 (unsigned)segments_map->guid, (unsigned)currentGuid);
         httpGetConfig(thing_name);
     }
 }
@@ -92,13 +92,13 @@ void httpGetConfig(const char *thing_name)
     int uriLen = snprintf(uri, sizeof(uri), "/thing/%s", thing_name);
     if (uriLen < 0 || uriLen >= sizeof(uri))
     {
-        Serial.println("cannot format led object uri");
+        ESP_LOGE(TAG, "cannot format led object uri");
         return;
     }
 
     uint16_t port = (uint16_t)strtoul(LED_OBJECT_SERVICE_PORT, nullptr, 10);
     if(port == 0) {
-        Serial.println("could not parse sequence service port");
+        ESP_LOGE(TAG, "could not parse object service port");
         return;
     }
 
@@ -114,20 +114,19 @@ void httpGetConfig(const char *thing_name)
     int httpResponseCode = http.GET();
     if (httpResponseCode <= 0)
     {
-        Serial.print("Error code: ");
-        Serial.println(httpResponseCode);
+        ESP_LOGE(TAG, "object service GET error code: %d", httpResponseCode);
         http.end();
         return;
     }
     if (httpResponseCode == 304)
     {
-        Serial.println("Object config is current, no update needed");
+        ESP_LOGI(TAG, "object config is current (304), no update needed");
         http.end();
         return;
     }
     if (httpResponseCode >= 400)
     {
-        Serial.println("failed to GET led object config from service");
+        ESP_LOGE(TAG, "failed to GET object config from service (HTTP %d)", httpResponseCode);
         http.end();
         return;
     }
@@ -135,7 +134,7 @@ void httpGetConfig(const char *thing_name)
     File file = SPIFFS.open(objectFileName, FILE_WRITE);
     if (!file)
     {
-        Serial.println("There was an error opening the file for writing");
+        ESP_LOGE(TAG, "could not open objects-config for writing");
         http.end();
         return;
     }
@@ -143,16 +142,16 @@ void httpGetConfig(const char *thing_name)
     int bytesWritten = http.writeToStream(&file);
     if (bytesWritten < 0 || bytesWritten != http.getSize())
     {
-        Serial.println("did not write all bytes to file");
+        ESP_LOGE(TAG, "did not write all bytes (wrote=%d, expected=%d)",
+                 bytesWritten, http.getSize());
         file.close();
         http.end();
         return;
     }
 
-    // Free resources
     file.close();
     http.end();
-    Serial.println("Configuration updated in FS, restarting!");
+    ESP_LOGI(TAG, "object config updated on FS, restarting...");
     ESP.restart();
 }
 
@@ -164,22 +163,20 @@ uint16_t readNumberOfPixels() {
     File file = SPIFFS.open(objectFileName, "r");
     if (!file || file.available() == 0)
     {
-        Serial.println("Failed to open objects config file for reading");
+        ESP_LOGW(TAG, "no objects-config file (readNumberOfPixels)");
         return 0;
     }
 
     pb_istream_t pbInputStream = FileToPbStream(file);
 
-    // decode
     uint16_t number_of_pixels = ::kivsee_render::segments::GetNumberOfPixels(&pbInputStream, nullptr, nullptr);
     if (number_of_pixels == 0)
     {
-        Serial.println("Failed to read number of pixels from config");
+        ESP_LOGW(TAG, "failed to read number of pixels from config");
         return 0;
     }
 
-    Serial.print("read number of pixels from config: ");
-    Serial.println(number_of_pixels);
+    ESP_LOGI(TAG, "read number of pixels from config: %u", (unsigned)number_of_pixels);
     file.close();
     return number_of_pixels;
 }
