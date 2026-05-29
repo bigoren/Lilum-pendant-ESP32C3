@@ -6,3 +6,6 @@
 # BT/NimBLE stack (saves flash + frees the BT controller RAM).
 # CONFIG_BT_ENABLED is not set
 # CONFIG_BT_NIMBLE_ENABLED is not set
+
+# Run at 80 MHz — halves dynamic CPU power.
+CONFIG_ESP32C3_DEFAULT_CPU_FREQ_MHZ=80

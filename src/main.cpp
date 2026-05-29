@@ -1,5 +1,7 @@
 #include <Arduino.h>
+#include <SPIFFS.h>
 #include "freertos/FreeRTOS.h"
+#include "esp_system.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "led_engine.h"
@@ -55,7 +57,6 @@ void ledTask(void *pvParameter) {
                 gesture_enter_white_mode();
             }
         }
-
         led_engine_loop();
         xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(16));
     }
@@ -129,15 +130,19 @@ void printTask(void *pvParameter) {
                             imu_gesture_state_str(), dip ? " <<DOUBLE DIP>>" : "");
         }
 
+        if (battery_key_short_press()) {
+            ESP_LOGI(TAG, "IP5306 short press → soft reboot");
+            esp_restart();
+        }
+
         if (LOG_ENABLE_BATTERY) {
             float temp = battery_get_temperature();
             pos += snprintf(buf + pos, sizeof(buf) - pos,
-                            " | Bat:%3d%% %s T:%.1f°C%s%s",
+                            " | Bat:%3d%% %s T:%.1f°C%s",
                             battery_get_level(),
                             battery_is_full() ? "FULL" : (battery_is_charging() ? "CHG" : "DIS"),
                             temp,
-                            battery_temp_in_range() ? "" : " !TEMP",
-                            battery_key_short_press() ? " <KEY>" : "");
+                            battery_temp_in_range() ? "" : " !TEMP");
         }
 
         ESP_LOGI(TAG, "%s", buf);
@@ -199,8 +204,14 @@ extern "C" void app_main(void) {
     // battery-powered builds — it disables the user-confirmation safety check.
     ESP_LOGW(TAG, "LILUM_GATE_BYPASS: skipping power-on long-press confirmation");
 #else
-    ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
-    battery_power_on_confirm(4000);   // returns only on success
+    if (esp_reset_reason() == ESP_RST_SW) {
+        // Software-initiated reset (e.g. double-click reboot) — the IP5306 rail
+        // stayed up so there was no accidental power-on; skip the gate.
+        ESP_LOGI(TAG, "Soft reset detected — skipping power-on gate");
+    } else {
+        ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
+        battery_power_on_confirm(4000);   // returns only on success
+    }
 #endif
     led_engine_set_boot_blink(false);
     ESP_LOGI(TAG, "Power-on confirmed — bringing up the rest of the system");
@@ -216,7 +227,8 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "ble_init completed");
 #else
     app_mode_install_start_kivsee(start_kivsee_task);
-    if (app_mode_get_boot() == APP_MODE_KIVSEE) {
+    const bool kivsee_boot = (app_mode_get_boot() == APP_MODE_KIVSEE);
+    if (kivsee_boot) {
         ESP_LOGI(TAG, "Boot mode: KIVSEE");
         led_engine_set_source(LED_SRC_KIVSEE);
         xTaskCreate(kivseeTask, "Kivsee Task", 8192, NULL, 1, NULL);
@@ -225,11 +237,29 @@ extern "C" void app_main(void) {
     }
 #endif
 
+    // Mic is only useful in standalone mode (beat-sync animations).
+    // Skipping it in kivsee mode saves ~1 mA and removes the I2S APB lock,
+    // which would otherwise block tickless light sleep.
+#ifdef LILUM_KIVSEE
+    if (!kivsee_boot) {
+        ESP_LOGI(TAG, "Starting Mic Service");
+        mic_service_init();
+    } else {
+        ESP_LOGI(TAG, "Mic Service skipped (kivsee mode)");
+    }
+#else
     ESP_LOGI(TAG, "Starting Mic Service");
     mic_service_init();
+#endif
 
     ESP_LOGI(TAG, "Starting Button Service");
     button_service_init();
+
+    if (!SPIFFS.begin(true)) {
+        ESP_LOGE(TAG, "SPIFFS mount failed — battery drain log unavailable");
+    }
+    battery_drain_log_dump();
+    battery_drain_log_boot();
 
     ESP_LOGI(TAG, "Starting Battery monitor task");
     battery_service_start();

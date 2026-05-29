@@ -5,6 +5,9 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # Arduino framework requires 1000 Hz tick rate.
 CONFIG_FREERTOS_HZ=1000
 
+# Run at 80 MHz (vs 160 MHz default) — halves dynamic CPU power.
+CONFIG_ESP32C3_DEFAULT_CPU_FREQ_MHZ=80
+
 # 4 MB flash (ESP32-C3-FH4 built-in flash).
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
