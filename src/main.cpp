@@ -131,8 +131,8 @@ void printTask(void *pvParameter) {
         }
 
         if (battery_key_short_press()) {
-            ESP_LOGI(TAG, "IP5306 short press → soft reboot");
-            esp_restart();
+            ESP_LOGI(TAG, "IP5306 short press → dumping battery drain log");
+            battery_drain_log_dump();
         }
 
         if (LOG_ENABLE_BATTERY) {
