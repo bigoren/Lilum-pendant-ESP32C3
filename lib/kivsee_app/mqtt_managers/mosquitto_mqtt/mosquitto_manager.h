@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include "WiFiClient.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include <functional>
 
 static const char *MQTT_TAG = "KIVSEE_MQTT";
@@ -15,7 +16,6 @@ static const char *MQTT_TAG = "KIVSEE_MQTT";
 #endif //MQTT_BROKER_PORT
 
 const char *triggerTopic = "trigger";
-const char *brightnessTopic = "brightness";
 
 class MosquittoManager : public MqttManager
 {
@@ -27,7 +27,16 @@ public:
     {
         if (client.connected())
             return;
-        
+
+        // MQTT client IDs must be unique per connection, but the thing name in
+        // topics is intentionally shared so same-named devices play in sync.
+        // Append the chip's MAC suffix so two "ring1"s get distinct client IDs
+        // while still subscribing to the same ring1 topics.
+        uint8_t mac[6];
+        esp_efuse_mac_get_default(mac);
+        char clientId[40];
+        snprintf(clientId, sizeof(clientId), "%s-%02X%02X", thing_name, mac[4], mac[5]);
+
         char statusTopic[64];
         snprintf(statusTopic, 64, "thing/%s/status", thing_name);
 
@@ -39,9 +48,9 @@ public:
 
         client.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT);
         client.setCallback(std::bind(&MosquittoManager::mqtt_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, thing_name));
-        ESP_LOGI(MQTT_TAG, "connecting to mqtt broker %s:%d as '%s'",
-                 MQTT_BROKER_IP, MQTT_BROKER_PORT, thing_name);
-        if (client.connect(thing_name, statusTopic, 1, true, willMsg))
+        ESP_LOGI(MQTT_TAG, "connecting to mqtt broker %s:%d as '%s' (thing '%s')",
+                 MQTT_BROKER_IP, MQTT_BROKER_PORT, clientId, thing_name);
+        if (client.connect(clientId, statusTopic, 1, true, willMsg))
         {
             ESP_LOGI(MQTT_TAG, "connected to message broker");
 
@@ -56,7 +65,6 @@ public:
             client.subscribe((String("animations/") + String(thing_name) + String("/#")).c_str(), 1);
             client.subscribe((String("obj/") + String(thing_name) + String("/guid")).c_str(), 1);
             client.subscribe(triggerTopic, 1);
-            client.subscribe(brightnessTopic, 1);
         }
         else
         {
@@ -99,8 +107,6 @@ private:
             callback->NewConfigGuidReceived(payload, length, thing_name);
         } else if(strncmp(triggerTopic, topic, sizeof(triggerTopic) + 1) == 0) {
             callback->TriggerInvoked(payload, length);
-        } else if(strncmp(brightnessTopic, topic, sizeof(brightnessTopic) + 1) == 0) {
-            callback->NewGlobalBrightnessReceived(payload,length);
         } else {
             ESP_LOGW(MQTT_TAG, "unknown topic: %s", topic);
         }
