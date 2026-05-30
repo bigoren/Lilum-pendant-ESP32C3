@@ -19,9 +19,6 @@ public:
     // when esp millis() returned 0, this was the epoch time
     QueueHandle_t epoch_time_update_queue;
 
-    // queue for updating required global brightness to be used by renderer
-    QueueHandle_t global_brightness_queue;
-
     // queue for renderer to signal that it is done with this runtime animation
     // and it can be disposed of (release memory, invalidate cache etc)
     QueueHandle_t runtime_animation_delete_queue;

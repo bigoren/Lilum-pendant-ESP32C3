@@ -35,7 +35,6 @@ namespace esp32animations
     private:
         void readRuntimeAnimationFromQueue();
         void readEpochTimeUpdateFromQueue();
-        void readGlobalBrightnessFromQueue();
         void reportMetricsIfNeeded();
         void updateAnimationEspStartTime(RuntimeAnimation *runtime_animation);
         unsigned long getAnimationTime(unsigned long current_millis, const RuntimeAnimation &runtime_animation);
@@ -50,7 +49,6 @@ namespace esp32animations
     private:
         uint16_t m_number_of_leds;
         kivsee_render::HSV *m_leds_hsv;
-        float m_global_brightness;
         unsigned long m_last_metrics_report_time = 0;
         Core1Metrics m_metrics = {
             .totalFrames = 0,

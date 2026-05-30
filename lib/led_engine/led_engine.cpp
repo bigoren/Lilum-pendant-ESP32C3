@@ -69,6 +69,11 @@ static bool         g_boot_blink_active   = false;
 static bool g_connecting_blink_active = false;
 #define CONNECTING_BLINK_PERIOD_MS  2000
 
+// Kivsee idle: connected to the network but no animation/trigger is playing.
+// Slow green status-pixel blink (1 s on / 1 s off) as a "ready & waiting" cue.
+static bool g_idle_blink_active = false;
+#define IDLE_BLINK_PERIOD_MS  2000
+
 static led_src_t g_led_source = LED_SRC_FASTLED;
 #endif
 
@@ -732,7 +737,17 @@ void led_engine_loop() {
         }
     }
 #ifdef LILUM_KIVSEE
-    // WiFi connecting: blink status pixel blue — distinct from the red charge states.
+    // Kivsee idle: connected but nothing playing — slow green blink (1 s on / 1 s
+    // off). Only while discharging so it never overrides the charge indications
+    // (charging red / full solid green), which are written just above.
+    if (g_idle_blink_active &&
+        battery_get_charge_status() == BAT_CHG_NOT_CHARGING) {
+        bool on = ((now / (IDLE_BLINK_PERIOD_MS / 2)) & 1) == 0;
+        leds[STATUS_LED_INDEX] = on ? CRGB::Green : CRGB::Black;
+    }
+
+    // WiFi connecting: blink status pixel blue — distinct from the red charge
+    // states. Applied last so it wins over the idle blink during bring-up.
     if (g_connecting_blink_active) {
         bool on = ((now / (CONNECTING_BLINK_PERIOD_MS / 2)) & 1) == 0;
         leds[STATUS_LED_INDEX] = on ? CRGB::Blue : CRGB::Black;
@@ -790,5 +805,9 @@ int led_engine_num_anim_leds(void) {
 
 void led_engine_set_connecting_blink(bool enable) {
     g_connecting_blink_active = enable;
+}
+
+void led_engine_set_idle_blink(bool enable) {
+    g_idle_blink_active = enable;
 }
 #endif

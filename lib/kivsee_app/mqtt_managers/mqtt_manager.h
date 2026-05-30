@@ -8,7 +8,6 @@ class MqttManagerCallbacks {
     public:
         virtual void NewConfigGuidReceived(const byte *payload, unsigned int length, const char *thing_name) = 0;
         virtual void TriggerInvoked(const byte *payload, unsigned int length) = 0;
-        virtual void NewGlobalBrightnessReceived(const byte *payload, unsigned int length) = 0;
 };
 
 class MqttManager {

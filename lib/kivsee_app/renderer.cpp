@@ -11,8 +11,7 @@ namespace esp32animations
     Renderer::Renderer(const QueueManager &queueManager, uint16_t number_of_leds)
         : m_queueManager(queueManager),
           m_number_of_leds(number_of_leds),
-          m_leds_hsv(new kivsee_render::HSV[number_of_leds]),
-          m_global_brightness(1.0)
+          m_leds_hsv(new kivsee_render::HSV[number_of_leds])
     {
         // led_engine_setup() owns FastLED.addLeds(); show() just fills the buffer.
     }
@@ -21,8 +20,11 @@ namespace esp32animations
     {
         readRuntimeAnimationFromQueue();
         readEpochTimeUpdateFromQueue();
-        readGlobalBrightnessFromQueue();
         reportMetricsIfNeeded();
+
+        // Idle indicator: no animation loaded means no trigger is playing, so
+        // ask the LED engine to slow-blink the status pixel green ("ready").
+        led_engine_set_idle_blink(runtime_animation.animation == nullptr);
 
         clear();
         if (runtime_animation.animation != nullptr)
@@ -74,12 +76,6 @@ namespace esp32animations
             ;
     }
 
-    void Renderer::readGlobalBrightnessFromQueue()
-    {
-        while (xQueueReceive(m_queueManager.global_brightness_queue, &m_global_brightness, 0) == pdTRUE)
-            ;
-    }
-
     void Renderer::reportMetricsIfNeeded()
     {
         if (millis() - m_last_metrics_report_time < METRICS_REPORT_INTERVAL_MS)
@@ -120,7 +116,11 @@ namespace esp32animations
         for (int i = 0; i < n; i++)
         {
             const kivsee_render::HSV &hsvVal = m_leds_hsv[i];
-            float normalizedBrightness = hsvVal.val * hsvVal.val * m_global_brightness;
+            // The Lilum is dimmed solely by its own button-set workingBrightness
+            // (applied via FastLED.setBrightness() in ledTask); it deliberately does
+            // not honor the MQTT global brightness, which is tuned for the much larger
+            // installations and would leave this 27-LED pendant far too dim.
+            float normalizedBrightness = hsvVal.val * hsvVal.val;
             uint8_t h = (uint8_t)(fmodf(hsvVal.hue, 1.0f) * 255.0f);
             uint8_t s = (uint8_t)(hsvVal.sat * 255.0f);
             uint8_t v = (uint8_t)(normalizedBrightness * 255.0f);

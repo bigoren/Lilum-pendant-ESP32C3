@@ -50,6 +50,10 @@ int          led_engine_num_anim_leds(void);
 
 // 1 s on / 1 s off brightness gating; signals "trying to connect" visually.
 void led_engine_set_connecting_blink(bool enable);
+
+// Kivsee idle indicator: slow green status-pixel blink (1 s on / 1 s off) when
+// connected but no animation/trigger is playing. Yields to the charge states.
+void led_engine_set_idle_blink(bool enable);
 #endif
 
 #ifdef __cplusplus

@@ -21,7 +21,6 @@ static const char *TAG = "KIVSEE";
 #include "secrets.h"
 #include "segment_store.h"
 #include "sequence.h"
-#include "brightness.h"
 #include "renderer.h"
 #include "mqtt_managers/mqtt_manager.h"
 #include "fs_manager.h"
@@ -66,15 +65,6 @@ public:
     msg.length = (uint16_t)length;
     memcpy(msg.payload, payload, msg.length);
     xQueueSend(queueManager.trigger_queue, &msg, 0);
-  }
-
-  void NewGlobalBrightnessReceived(const byte *payload, unsigned int length)
-  {
-    float new_global_brightness;
-    bool success = handleGlobalBrightnessMessage(payload, length, &new_global_brightness);
-    if (success) {
-      xQueueSend(queueManager.global_brightness_queue, &new_global_brightness, pdMS_TO_TICKS(100));
-    }
   }
 };
 
@@ -187,13 +177,16 @@ void kivsee_app_loop(void)
   bool wifi_connected = (WiFi.status() == WL_CONNECTED);
   if (wifi_connected && !wifi_ever_connected) {
     wifi_ever_connected = true;
-    led_engine_set_connecting_blink(false);
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     ESP_LOGI(TAG, "WiFi connected  IP=%s  GW=%s  DNS=%s",
              WiFi.localIP().toString().c_str(),
              WiFi.gatewayIP().toString().c_str(),
              WiFi.dnsIP().toString().c_str());
   }
+
+  // Keep the blue connecting-blink running until MQTT is up, not just WiFi —
+  // a WiFi link without a broker connection still can't receive triggers.
+  led_engine_set_connecting_blink(!mqttManager->connected());
 
   if (!wifi_ever_connected &&
       current_millis - wifi_first_attempt_ms >= WIFI_FIRST_CONNECT_TIMEOUT_MS) {
