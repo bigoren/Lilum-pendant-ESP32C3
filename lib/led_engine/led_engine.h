@@ -25,12 +25,15 @@ void led_engine_set_white_mode(bool enable);
 /// Returns true when white mode is active.
 bool led_engine_is_white_mode(void);
 
-/// Enable a brightness-based blink overlay used during the power-on confirm
-/// window. While enabled, the existing animations still run; only the global
-/// FastLED brightness is gated on/off in a square wave so the visible effect
-/// is the LEDs blinking. Disable when the system has confirmed power-on so
-/// animations are shown at their normal brightness.
-void led_engine_set_boot_blink(bool enable);
+/// Apply the master's advertised timestamp (followers only) so beat/hue driven
+/// animations align to the master's clock. The master never calls this, so its
+/// time base stays at zero and animations run on the local clock.
+void led_engine_apply_master_time(uint32_t master_time_ms);
+
+/// Apply the master's music analysis (followers only) so music-reactive
+/// animations (e.g. mSinelon) use the master's microphone-derived tempo and
+/// volume instead of their own. The master ignores this and uses its local mic.
+void led_engine_apply_music(uint8_t bpm, uint8_t volume);
 
 #ifdef __cplusplus
 }
@@ -41,3 +44,4 @@ extern bool    g_manual_mode_active;   // true = manual single-pattern mode
 extern uint8_t g_manual_pattern;       // current manual-pattern index
 extern bool    g_output_state;         // GPIO 20 output state (true = HIGH)
 extern uint8_t workingBrightness;      // current LED brightness
+extern volatile uint32_t g_engine_timebase; // follower clock correction; 0 on master

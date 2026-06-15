@@ -143,23 +143,17 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(rc);
     ESP_LOGI(TAG, "NVS initialized");
 
-    // ── Power-on gate ──────────────────────────────────────
+    // ── Power-on init ──────────────────────────────────────
     // 1) Bring up I2C (via IMU) so we can talk to the IP5306.
     // 2) Configure IP5306 (long-press = 3 s, etc.).
-    // 3) Start the LED task with the boot-blink overlay enabled so the
-    //    animation runs but visibly blinks while we wait for confirmation.
-    // 4) Wait up to 4 s for the user to complete a long-press.
-    //    If absent → battery_power_on_confirm() drops BOOST_EN and
-    //    the chip dies. Otherwise the boot-blink overlay is cleared and
-    //    the rest of the system comes up.
+    // 3) Start the LED task so animations run immediately.
     ESP_LOGI(TAG, "Starting IMU Service (brings up I2C)");
     imu_service_init();
 
     ESP_LOGI(TAG, "Initialising Battery Service (IP5306)");
     battery_service_init();
 
-    ESP_LOGI(TAG, "Starting LED Task (boot-blink overlay ON)");
-    led_engine_set_boot_blink(true);
+    ESP_LOGI(TAG, "Starting LED Task");
     xTaskCreate(ledTask, // Task function
          "LED Task", // Name of the task
         4096, // Stack size in bytes
@@ -168,12 +162,7 @@ extern "C" void app_main(void) {
         NULL // Task handle
     );
 
-    ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
-    battery_power_on_confirm(4000);   // returns only on success
-    led_engine_set_boot_blink(false);
-    ESP_LOGI(TAG, "Power-on confirmed — bringing up the rest of the system");
-
-    // ── Confirmed: bring up the rest of the system ─────────
+    // ── Bring up the rest of the system ────────────────────
     ESP_LOGI(TAG, "Calling ble_init...");
     ble_init();
     ble_set_logging(false);

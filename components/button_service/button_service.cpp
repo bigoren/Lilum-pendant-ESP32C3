@@ -1,5 +1,6 @@
 #include "button_service.h"
 #include "led_engine.h"
+#include "orchestra_shared_config.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -242,6 +243,11 @@ static void button_task(void *param)
 // ---------------------------------------------------------------------------
 void button_service_init(void)
 {
+    if (ORCHESTRA_ROLE != OrchestraRole::Master) {
+        ESP_LOGI(TAG, "Follower role: button service disabled (playback driven by BLE only)");
+        return;
+    }
+
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = 1ULL << BUTTON_GPIO;
     io_conf.mode         = GPIO_MODE_INPUT;
