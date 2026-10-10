@@ -32,6 +32,7 @@ void orchestra_ble_deinit(void);
 #include "orchestra_config.h"
 #include "orchestra_payload.h"
 #include "led_engine.h"
+#include "mic_service.h"
 
 static const char *TAG = "BLE";
 
@@ -40,23 +41,18 @@ void ble_set_logging(bool enabled) {
 }
 
 static constexpr uint32_t BLE_STARTUP_ADV_MS = ORCHESTRA_STARTUP_WINDOW_MS;
-static constexpr uint32_t BLE_CYCLE_OFF_MS = ORCHESTRA_CYCLE_OFF_MS;
-static constexpr uint32_t BLE_CYCLE_ADV_MS = ORCHESTRA_CYCLE_ADV_MS;
 static bool ble_initialized = false;
 static bool ble_advertising = false;
 static bool ble_scanning = false;
 static bool ble_connected = false;
-static bool ble_startup_cycle_complete = false;
+static bool ble_broadcast_only_mode = false;  // Master: true once the connectable startup window ends with no connection.
 static bool follower_synced = false;
-static bool follower_ever_synced = false;  // True once first sync is achieved.
-static int64_t follower_master_offset_ms = 0;  // Local time minus master's timestamp.
 static TaskHandle_t follower_scan_task_handle = NULL;
 static TaskHandle_t master_adv_refresh_task_handle = NULL;
 static uint32_t scan_adv_count = 0;  // Count of advertisements seen in current scan
-static uint8_t last_advertised_mode = 0;  // Track mode currently in the adv payload
 static bool master_heard_in_scan = false;  // Set when master packet received during a scan
-static uint8_t consecutive_missed_scans = 0;  // Count of consecutive scan windows without master
-static uint32_t last_master_heard_local_ms = 0;  // Follower local time when master was last received
+
+static void ble_app_advertise(void);  // Defined later; used by the advertising-window timer callback.
 
 // GATT inactivity timer (master only)
 #define BLE_GATT_INACTIVITY_TIMEOUT_MS 300000UL
@@ -85,13 +81,21 @@ static TimerHandle_t adv_timeout_timer = NULL;
 
 static void adv_timeout_cb(TimerHandle_t xTimer) {
     (void)xTimer;
-    ESP_LOGI(TAG, "Advertising timeout timer fired");
+    ESP_LOGI(TAG, "Connectable advertising window elapsed");
+    if (ble_connected) {
+        // A phone connected during the window; keep the connection and stop advertising.
+        ble_gap_adv_stop();
+        ble_advertising = false;
+        ESP_LOGI(TAG, "Connection active; stopping connectable advertising");
+        return;
+    }
+    // No connection was made: switch to non-connectable advertising and keep
+    // broadcasting state indefinitely so followers can continue to sync.
+    ESP_LOGI(TAG, "No connection during window; switching to non-connectable state broadcast");
+    ble_broadcast_only_mode = true;
     ble_gap_adv_stop();
     ble_advertising = false;
-    if (!ble_connected) {
-        ESP_LOGI(TAG, "No connection during advertising window; tearing down BLE permanently");
-        orchestra_ble_deinit();
-    }
+    ble_app_advertise();
 }
 
 bool ble_is_follower_synced(void)
@@ -115,8 +119,8 @@ bool ble_is_currently_scanning(void)
     return ble_scanning;
 }
 
-// Animation mode is owned by sketch.cpp and shared with BLE.
-extern uint8_t g_animation_mode;
+// Animation/playback globals (g_animation_mode, g_manual_mode_active,
+// g_manual_pattern) and led_engine_apply_master_time() are provided by led_engine.h.
 
 // Custom 128-bit UUIDs
 static const ble_uuid128_t svc_uuid = {
@@ -151,7 +155,6 @@ static int mode_chr_access(uint16_t conn_handle,
 static void ble_app_on_sync(void); // Runs when the BLE host is synchronized and ready to begin advertising.
 static void ble_app_on_reset(int reason); // Logs BLE host reset reasons for diagnostics.
 static void ble_host_task(void *param); // NimBLE host task entry point that runs the BLE host loop.
-static void ble_deinit_and_restart_task(void *param); // One-shot task that deinitializes BLE, waits, then reinitializes BLE.
 static uint32_t ble_get_sync_timestamp_ms(void); // Monotonic timestamp used as the sync reference in advertising.
 static bool ble_is_sync_source(const OrchestraAdvPayload &payload); // Checks whether an advertisement came from the configured master.
 static void ble_apply_master_packet(const OrchestraAdvPayload &payload); // Updates follower sync and animation based on master packet.
@@ -186,6 +189,15 @@ static uint32_t ble_get_sync_timestamp_ms(void)
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
 
+// Microphone BPM clamped into the advertising payload's uint8_t field. The beat
+// detector can momentarily report tempos above 255, so cap the value to avoid
+// wrapping when packed into a single byte.
+static uint8_t ble_get_music_bpm(void)
+{
+    uint16_t bpm = mic_get_bpm();
+    return static_cast<uint8_t>(bpm > 255 ? 255 : bpm);
+}
+
 static bool ble_is_sync_source(const OrchestraAdvPayload &payload)
 {
     const bool role_ok = payload.role == OrchestraRole::Master;
@@ -197,26 +209,39 @@ static bool ble_is_sync_source(const OrchestraAdvPayload &payload)
 static void ble_apply_master_packet(const OrchestraAdvPayload &payload)
 {
     const uint32_t now_ms = ble_get_sync_timestamp_ms();
-    follower_master_offset_ms = static_cast<int64_t>(now_ms) - static_cast<int64_t>(payload.sync_timestamp_ms);
 
     if (!follower_synced) {
         follower_synced = true;
-        follower_ever_synced = true;
         ESP_LOGI(TAG,
-                 "Follower synced to master device=%u group=%u master_ts=%lu local_ts=%lu offset=%lld",
+                 "Follower synced to master device=%u group=%u master_ts=%lu local_ts=%lu",
                  payload.device_id,
                  payload.group_id,
                  static_cast<unsigned long>(payload.sync_timestamp_ms),
-                 static_cast<unsigned long>(now_ms),
-                 static_cast<long long>(follower_master_offset_ms));
+                 static_cast<unsigned long>(now_ms));
     }
 
     master_heard_in_scan = true;
-    last_master_heard_local_ms = now_ms;
+
+    // Align this follower's animation clock to the master so beat/hue driven
+    // patterns stay in phase across the group.
+    led_engine_apply_master_time(payload.sync_timestamp_ms);
+
+    // Forward the master's microphone analysis so music-reactive animations
+    // (e.g. mSinelon) react to the same audio as the master.
+    led_engine_apply_music(payload.music_bpm, payload.music_volume);
 
     if (g_animation_mode != payload.animation_mode) {
         g_animation_mode = payload.animation_mode;
         ESP_LOGI(TAG, "Animation updated by master to mode=%u", g_animation_mode);
+    }
+
+    // Mirror the master's playback selection (auto vs manual single-pattern).
+    const bool manual_active = payload.manual_mode_active != 0;
+    if (g_manual_mode_active != manual_active || g_manual_pattern != payload.manual_pattern) {
+        g_manual_mode_active = manual_active;
+        g_manual_pattern = payload.manual_pattern;
+        ESP_LOGI(TAG, "Playback updated by master: manual=%u pattern=%u",
+                 manual_active ? 1u : 0u, payload.manual_pattern);
     }
 }
 
@@ -415,10 +440,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 // A connection was made during the advertising window; stack stays up
                 ESP_LOGI(TAG, "Advertising complete (connection active)");
             } else {
-                // No connection was established during the advertising window.
-                // Tear down the BLE stack permanently to save power.
-                ESP_LOGI(TAG, "Advertising complete with no connection; tearing down BLE permanently");
-                orchestra_ble_deinit();
+                // No connection was established; keep broadcasting state by
+                // resuming advertising in non-connectable mode instead of tearing down.
+                ESP_LOGI(TAG, "Advertising complete with no connection; resuming non-connectable state broadcast");
+                ble_broadcast_only_mode = true;
+                ble_app_advertise();
             }
             return 0;
 
@@ -449,10 +475,6 @@ static void ble_update_adv_payload(void)
 
     memset(&fields, 0, sizeof(fields));
 
-    static const char short_name[] = "Pend-01";
-    fields.name = (uint8_t *)short_name;
-    fields.name_len = (uint8_t)strlen(short_name);
-    fields.name_is_complete = 0;
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
     OrchestraAdvPayload payload = {
@@ -463,6 +485,10 @@ static void ble_update_adv_payload(void)
         .master_id = ORCHESTRA_MASTER_ID,
         .sync_timestamp_ms = sync_timestamp_ms,
         .animation_mode = g_animation_mode,
+        .manual_mode_active = static_cast<uint8_t>(g_manual_mode_active ? 1u : 0u),
+        .manual_pattern = g_manual_pattern,
+        .music_bpm = ble_get_music_bpm(),
+        .music_volume = mic_get_volume(),
     };
 
     size_t len = orchestra_encode_adv_payload(orchestra_adv_data, sizeof(orchestra_adv_data), payload);
@@ -479,7 +505,6 @@ static void ble_update_adv_payload(void)
         return;
     }
 
-    last_advertised_mode = g_animation_mode;
     ESP_LOGI(TAG, "Adv payload refreshed: anim=%u ts=%lu", g_animation_mode,
              static_cast<unsigned long>(sync_timestamp_ms));
 }
@@ -490,7 +515,7 @@ static void ble_master_adv_refresh_task(void *param)
 {
     (void)param;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(50));
         if (!ble_initialized || !ble_advertising) {
             continue;
         }
@@ -510,28 +535,19 @@ static void ble_app_advertise(void)
     struct ble_hs_adv_fields rsp_fields;
     uint8_t orchestra_adv_data[ORCHESTRA_ADV_PAYLOAD_LEN] = {0};
     uint32_t sync_timestamp_ms = ble_get_sync_timestamp_ms();
-    int adv_duration_ms = ble_startup_cycle_complete ? BLE_CYCLE_ADV_MS : BLE_STARTUP_ADV_MS;
+    int adv_duration_ms = BLE_STARTUP_ADV_MS;
     // Use BLE_HS_FOREVER for NimBLE because the payload-refresh task calls
     // ble_gap_adv_set_fields() every 500 ms which resets the NimBLE duration
     // counter.  The actual timeout is enforced by adv_timeout_timer instead.
     int nimble_duration = BLE_HS_FOREVER;
 
-    // Cycle animation mode at the start of each post-startup advertising window
-    // so the mode change is always visible to followers.
-    if (ble_startup_cycle_complete) {
-        g_animation_mode = (g_animation_mode + 1) % led_engine_get_num_auto_patterns();
-        ESP_LOGI(TAG, "Master animation mode cycled to %u", g_animation_mode);
-    }
-
     memset(&fields, 0, sizeof(fields));
     memset(&rsp_fields, 0, sizeof(rsp_fields));
 
-    // Keep primary ADV packet compact (31-byte limit); place the full name in scan response.
+    // Keep primary ADV packet compact (31-byte limit): the orchestra manufacturer
+    // payload now fills most of it, so the device name is carried only in the scan
+    // response.
     const char *name = ble_svc_gap_device_name();
-    static const char short_name[] = "Pend-01";
-    fields.name = (uint8_t *)short_name;
-    fields.name_len = (uint8_t)strlen(short_name);
-    fields.name_is_complete = 0;
     rsp_fields.name = (uint8_t *)name;
     rsp_fields.name_len = (uint8_t)strlen(name);
     rsp_fields.name_is_complete = 1;
@@ -547,6 +563,10 @@ static void ble_app_advertise(void)
         .master_id = ORCHESTRA_MASTER_ID,
         .sync_timestamp_ms = sync_timestamp_ms,
         .animation_mode = g_animation_mode,
+        .manual_mode_active = static_cast<uint8_t>(g_manual_mode_active ? 1u : 0u),
+        .manual_pattern = g_manual_pattern,
+        .music_bpm = ble_get_music_bpm(),
+        .music_volume = mic_get_volume(),
     };
 
     size_t orchestra_adv_data_len = orchestra_encode_adv_payload(orchestra_adv_data,
@@ -573,8 +593,18 @@ static void ble_app_advertise(void)
     }
 
     memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    // First ORCHESTRA_STARTUP_WINDOW_MS: connectable so a phone can connect via GATT.
+    // Afterwards (no connection): non-connectable broadcast of state, advertised forever.
+    adv_params.conn_mode = ble_broadcast_only_mode ? BLE_GAP_CONN_MODE_NON : BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    // Advertise as fast as the BLE spec allows. Units are 0.625 ms.
+    // Connectable (ADV_IND): minimum is 20 ms (0x0020).
+    // Non-connectable legacy (ADV_NONCONN_IND): minimum is 100 ms (0x00A0);
+    // using 20 ms there makes the controller reject ble_gap_adv_start(), so the
+    // master would go silent after the connectable window. Clamp accordingly.
+    const uint16_t adv_itvl = ble_broadcast_only_mode ? 0x00A0 : 0x0020;
+    adv_params.itvl_min = adv_itvl;
+    adv_params.itvl_max = adv_itvl;
 
     rc = ble_gap_adv_start(own_addr_type,
                            NULL,
@@ -588,17 +618,19 @@ static void ble_app_advertise(void)
     }
 
     ble_advertising = true;
-    last_advertised_mode = g_animation_mode;
 
-    // Start (or restart) the software timer that enforces the advertising window
-    if (adv_timeout_timer) {
+    // Only the connectable startup window is time-limited. Once we are in
+    // non-connectable broadcast mode the master advertises its state forever,
+    // so the window timer is left disarmed.
+    if (!ble_broadcast_only_mode && adv_timeout_timer) {
         xTimerStop(adv_timeout_timer, 0);
         xTimerChangePeriod(adv_timeout_timer, pdMS_TO_TICKS(adv_duration_ms), 0);
         xTimerStart(adv_timeout_timer, 0);
     }
 
     ESP_LOGI(TAG,
-             "Advertising started for %d ms (group=%u device=%u role=%s position=%d master=%u ts_ms=%lu anim=%u)",
+             "Advertising started (%s) for %d ms (group=%u device=%u role=%s position=%d master=%u ts_ms=%lu anim=%u)",
+             ble_broadcast_only_mode ? "non-connectable broadcast" : "connectable",
              adv_duration_ms,
              ORCHESTRA_GROUP_ID,
              ORCHESTRA_DEVICE_ID,
@@ -703,23 +735,6 @@ void orchestra_ble_deinit(void)
     ble_initialized = false;
     ble_advertising = false;
     ESP_LOGI(TAG, "BLE stack torn down");
-}
-
-// Tears down BLE, waits 38 seconds, then re-initialises it so advertising resumes.
-// Runs as a one-shot FreeRTOS task spawned from the ADV_COMPLETE event handler.
-static void ble_deinit_and_restart_task(void *param)
-{
-    (void)param;
-    ESP_LOGI(TAG, "BLE off period: tearing down stack");
-    orchestra_ble_deinit();
-
-    ESP_LOGI(TAG, "BLE sleeping for %d milliseconds", BLE_CYCLE_OFF_MS);
-    vTaskDelay(pdMS_TO_TICKS(BLE_CYCLE_OFF_MS));
-
-    ESP_LOGI(TAG, "Restarting BLE stack");
-    ble_init();
-
-    vTaskDelete(NULL);
 }
 
 void ble_init(void)

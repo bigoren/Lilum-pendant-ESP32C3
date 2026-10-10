@@ -19,5 +19,6 @@ else()
             "../../lib/led_engine"
         REQUIRES
             bt
+            mic_service
     )
 endif()

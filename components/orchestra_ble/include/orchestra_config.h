@@ -4,4 +4,4 @@
 
 // BLE advertising payload metadata.
 static constexpr uint16_t ORCHESTRA_ADV_COMPANY_ID = 0xFFFF;
-static constexpr uint8_t ORCHESTRA_ADV_DATA_VERSION = 3;
+static constexpr uint8_t ORCHESTRA_ADV_DATA_VERSION = 5;
