@@ -33,16 +33,6 @@ void battery_service_init(void);
 void battery_service_start(void);
 
 /**
- * Block waiting for the user to complete a long-press (3 s) on the
- * IP5306 power key, up to `timeout_ms`. Must be called after
- * battery_service_init() and before battery_service_start().
- *
- * - Returns true once a long-press latch is detected.
- * - On timeout, calls battery_power_off() and never returns.
- */
-bool battery_power_on_confirm(uint32_t timeout_ms);
-
-/**
  * Drop the IP5306 boost rail (BOOST_EN = 0) so the 5 V → 3.3 V chain
  * collapses and the ESP32-C3 powers down. Does not return.
  */

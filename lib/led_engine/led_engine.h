@@ -30,7 +30,7 @@ bool led_engine_is_white_mode(void);
 /// FastLED brightness is gated on/off in a square wave so the visible effect
 /// is the LEDs blinking. Disable when the system has confirmed power-on so
 /// animations are shown at their normal brightness.
-void led_engine_set_boot_blink(bool enable);
+
 
 #ifdef __cplusplus
 }

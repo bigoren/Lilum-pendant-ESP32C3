@@ -1,14 +1,25 @@
-
-
-// Forward declaration for use in timer callback
-void orchestra_ble_deinit(void);
-
+// Lilum BLE stack for the Mandalum pendant.
+//
+// Implements the lifecycle and GATT surface described in:
+//   - lilum-app-prd-v3.2.md §§4, 5, 9
+//   - docs/firmware-ble-protocol.md §§3–6
+//
+// State machine
+// -------------
+//   Boot ──► ConfigAdv ──► ConfigConnected ──► (Runtime{Master|Follower|Idle})
+//                  │                                ▲
+//                  └──── 120 s timer expires ──────┘
+//                  │
+//                  └──── disconnect (any reason) ──► Runtime{...}
+//
+// Once a Runtime state is entered, the element is *not* connectable until
+// the next power-cycle. Master advertises continuously; Follower scans
+// continuously; Idle is BLE-quiet (standalone elements).
 #include "simple_BLE.h"
 
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
-#include <limits.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -25,409 +36,817 @@ void orchestra_ble_deinit(void);
 #include "host/ble_hs.h"
 #include "host/ble_hs_adv.h"
 #include "host/ble_uuid.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
-#include "store/config/ble_store_config.h"
 
-#include "orchestra_config.h"
+#include "lilum_ble_protocol.h"
+#include "lilum_config.h"
+#include "lilum_nvs.h"
 #include "orchestra_payload.h"
 #include "led_engine.h"
 
+#ifndef BLE_HS_CONN_HANDLE_NONE
+#define BLE_HS_CONN_HANDLE_NONE 0xFFFF
+#endif
+
 static const char *TAG = "BLE";
 
-void ble_set_logging(bool enabled) {
+// ── State ────────────────────────────────────────────────────────────────
+enum class BleStateMachine : uint8_t {
+    Boot = 0,
+    ConfigAdv,          // Connectable extended advertising during 120 s window.
+    ConfigConnected,    // Phone is connected; window timer paused.
+    RuntimeMaster,      // Non-connectable continuous adv of runtime payload.
+    RuntimeFollower,    // Continuous passive scan of master adv.
+    RuntimeIdle,        // Standalone; BLE radio silent.
+};
+
+static BleStateMachine s_state = BleStateMachine::Boot;
+
+static LilumBinding        s_binding;
+static LilumElementConfig  s_element_cfg;
+static uint8_t             s_own_addr_type = 0;
+static uint16_t            s_conn_handle   = BLE_HS_CONN_HANDLE_NONE;
+static SemaphoreHandle_t   s_host_stopped_sem = NULL;
+static bool                s_initialized   = false;
+static bool                s_advertising   = false;
+static bool                s_scanning      = false;
+static bool                s_connected     = false;
+static bool                s_follower_synced = false;
+static uint8_t             s_live_brightness_override = 0;
+
+// Time the configuration window opened (esp_timer microseconds). Zero when
+// the window has already closed.
+static int64_t             s_config_window_started_us = 0;
+// While a phone is connected the timer is "paused"; we record how many
+// seconds were remaining at the moment of connection so we can stop counting.
+static uint8_t             s_config_window_paused_remaining_sec = 0;
+static bool                s_config_window_paused = false;
+
+// Extended-advertising instance the firmware uses everywhere.
+static constexpr uint8_t   kExtAdvInstance = 0;
+
+// Maintenance task: refreshes the config-window adv payload once per second
+// (so the remaining-seconds field stays current) and triggers the window
+// expiry transition.
+static TaskHandle_t        s_maintenance_task = NULL;
+
+// Runtime adv refresh task (master only).
+static TaskHandle_t        s_runtime_refresh_task = NULL;
+
+// ── UUIDs ────────────────────────────────────────────────────────────────
+static const ble_uuid128_t UUID_SVC_PRIMARY  = { { BLE_UUID_TYPE_128 }, LILUM_SVC_PRIMARY_BYTES  };
+static const ble_uuid128_t UUID_SVC_IDENTITY = { { BLE_UUID_TYPE_128 }, LILUM_SVC_IDENTITY_BYTES };
+static const ble_uuid128_t UUID_SVC_BINDING  = { { BLE_UUID_TYPE_128 }, LILUM_SVC_BINDING_BYTES  };
+static const ble_uuid128_t UUID_SVC_CONFIG   = { { BLE_UUID_TYPE_128 }, LILUM_SVC_CONFIG_BYTES   };
+static const ble_uuid128_t UUID_SVC_LIVE     = { { BLE_UUID_TYPE_128 }, LILUM_SVC_LIVE_BYTES     };
+
+static const ble_uuid128_t UUID_ID_TYPE      = { { BLE_UUID_TYPE_128 }, LILUM_CHR_IDENTITY_TYPE_BYTES   };
+static const ble_uuid128_t UUID_ID_FWVER     = { { BLE_UUID_TYPE_128 }, LILUM_CHR_IDENTITY_FWVER_BYTES  };
+static const ble_uuid128_t UUID_ID_HWREV     = { { BLE_UUID_TYPE_128 }, LILUM_CHR_IDENTITY_HWREV_BYTES  };
+static const ble_uuid128_t UUID_ID_SERIAL    = { { BLE_UUID_TYPE_128 }, LILUM_CHR_IDENTITY_SERIAL_BYTES };
+static const ble_uuid128_t UUID_ID_CFGINFO   = { { BLE_UUID_TYPE_128 }, LILUM_CHR_IDENTITY_CONFIG_INFO_BYTES };
+
+static const ble_uuid128_t UUID_BIND_PAIR_ID    = { { BLE_UUID_TYPE_128 }, LILUM_CHR_BINDING_PAIR_ID_BYTES    };
+static const ble_uuid128_t UUID_BIND_PAIR_ROLE  = { { BLE_UUID_TYPE_128 }, LILUM_CHR_BINDING_PAIR_ROLE_BYTES  };
+static const ble_uuid128_t UUID_BIND_GROUP_ID   = { { BLE_UUID_TYPE_128 }, LILUM_CHR_BINDING_GROUP_ID_BYTES   };
+static const ble_uuid128_t UUID_BIND_GROUP_ROLE = { { BLE_UUID_TYPE_128 }, LILUM_CHR_BINDING_GROUP_ROLE_BYTES };
+static const ble_uuid128_t UUID_BIND_SLOT       = { { BLE_UUID_TYPE_128 }, LILUM_CHR_BINDING_SLOT_BYTES       };
+
+static const ble_uuid128_t UUID_CFG_STANDALONE = { { BLE_UUID_TYPE_128 }, LILUM_CHR_CFG_STANDALONE_BYTES };
+static const ble_uuid128_t UUID_CFG_SHARED     = { { BLE_UUID_TYPE_128 }, LILUM_CHR_CFG_SHARED_BYTES     };
+
+static const ble_uuid128_t UUID_LIVE_BRIGHTNESS = { { BLE_UUID_TYPE_128 }, LILUM_CHR_LIVE_BRIGHTNESS_BYTES };
+static const ble_uuid128_t UUID_LIVE_PREVIEW    = { { BLE_UUID_TYPE_128 }, LILUM_CHR_LIVE_PREVIEW_BYTES    };
+static const ble_uuid128_t UUID_LIVE_FLASHLIGHT = { { BLE_UUID_TYPE_128 }, LILUM_CHR_LIVE_FLASHLIGHT_BYTES };
+static const ble_uuid128_t UUID_LIVE_APPLYEXIT  = { { BLE_UUID_TYPE_128 }, LILUM_CHR_LIVE_APPLY_EXIT_BYTES };
+
+// Forward declarations
+static void enter_config_adv_window(void);
+static void exit_to_runtime(void);
+static void enter_runtime_master(void);
+static void enter_runtime_follower(void);
+static void enter_runtime_idle(void);
+static void start_config_window_adv(void);
+static void stop_all_radio(void);
+static void start_runtime_master_adv(void);
+static void start_runtime_follower_scan(void);
+static int  gap_event_cb(struct ble_gap_event *event, void *arg);
+static void on_host_sync(void);
+static void on_host_reset(int reason);
+static void host_task(void *param);
+static void maintenance_task(void *arg);
+static void runtime_refresh_task(void *arg);
+static uint8_t compute_remaining_seconds(void);
+static void apply_element_config_to_engine(const LilumElementConfig &cfg);
+
+// External symbols owned by led_engine.cpp.
+extern uint8_t g_animation_mode;
+extern bool    g_manual_mode_active;
+extern uint8_t g_manual_pattern;
+extern uint8_t workingBrightness;
+
+// ── Public status helpers ────────────────────────────────────────────────
+void ble_set_logging(bool enabled)
+{
     esp_log_level_set(TAG, enabled ? ESP_LOG_INFO : ESP_LOG_NONE);
 }
 
-static constexpr uint32_t BLE_STARTUP_ADV_MS = ORCHESTRA_STARTUP_WINDOW_MS;
-static constexpr uint32_t BLE_CYCLE_OFF_MS = ORCHESTRA_CYCLE_OFF_MS;
-static constexpr uint32_t BLE_CYCLE_ADV_MS = ORCHESTRA_CYCLE_ADV_MS;
-static bool ble_initialized = false;
-static bool ble_advertising = false;
-static bool ble_scanning = false;
-static bool ble_connected = false;
-static bool ble_startup_cycle_complete = false;
-static bool follower_synced = false;
-static bool follower_ever_synced = false;  // True once first sync is achieved.
-static int64_t follower_master_offset_ms = 0;  // Local time minus master's timestamp.
-static TaskHandle_t follower_scan_task_handle = NULL;
-static TaskHandle_t master_adv_refresh_task_handle = NULL;
-static uint32_t scan_adv_count = 0;  // Count of advertisements seen in current scan
-static uint8_t last_advertised_mode = 0;  // Track mode currently in the adv payload
-static bool master_heard_in_scan = false;  // Set when master packet received during a scan
-static uint8_t consecutive_missed_scans = 0;  // Count of consecutive scan windows without master
-static uint32_t last_master_heard_local_ms = 0;  // Follower local time when master was last received
-
-// GATT inactivity timer (master only)
-#define BLE_GATT_INACTIVITY_TIMEOUT_MS 300000UL
-static TimerHandle_t gatt_inactivity_timer = NULL;
-
-static void gatt_inactivity_timeout_cb(TimerHandle_t xTimer) {
-    ESP_LOGI(TAG, "GATT inactivity timeout reached, disconnecting and tearing down BLE stack");
-    if (ble_connected) {
-        ble_gap_terminate(0, BLE_ERR_REM_USER_CONN_TERM); // 0 = any connection
-    }
-    orchestra_ble_deinit();
-}
-
-static void gatt_inactivity_timer_reset() {
-    if (gatt_inactivity_timer) {
-        xTimerStop(gatt_inactivity_timer, 0);
-        xTimerChangePeriod(gatt_inactivity_timer, pdMS_TO_TICKS(BLE_GATT_INACTIVITY_TIMEOUT_MS), 0);
-        xTimerStart(gatt_inactivity_timer, 0);
-    }
-}
-
-// Advertising timeout timer – enforces the startup window independently of NimBLE,
-// because ble_gap_adv_set_fields() (called by the payload-refresh task) can
-// internally restart advertising and reset the NimBLE duration counter.
-static TimerHandle_t adv_timeout_timer = NULL;
-
-static void adv_timeout_cb(TimerHandle_t xTimer) {
-    (void)xTimer;
-    ESP_LOGI(TAG, "Advertising timeout timer fired");
-    ble_gap_adv_stop();
-    ble_advertising = false;
-    if (!ble_connected) {
-        ESP_LOGI(TAG, "No connection during advertising window; tearing down BLE permanently");
-        orchestra_ble_deinit();
-    }
-}
-
-bool ble_is_follower_synced(void)
+bool ble_is_currently_advertising(void) { return s_advertising; }
+bool ble_is_currently_scanning(void)    { return s_scanning;    }
+bool ble_is_connected(void)             { return s_connected;   }
+bool ble_in_config_window(void)
 {
-    return follower_synced;
+    return s_state == BleStateMachine::ConfigAdv ||
+           s_state == BleStateMachine::ConfigConnected;
+}
+uint8_t ble_config_window_remaining_sec(void) { return compute_remaining_seconds(); }
+bool ble_runtime_is_master(void)   { return s_state == BleStateMachine::RuntimeMaster;   }
+bool ble_runtime_is_follower(void) { return s_state == BleStateMachine::RuntimeFollower; }
+bool ble_is_follower_synced(void)  { return s_follower_synced; }
+uint8_t ble_live_brightness_override(void) { return s_live_brightness_override; }
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+static uint8_t compute_remaining_seconds(void)
+{
+    if (s_config_window_paused) {
+        return s_config_window_paused_remaining_sec;
+    }
+    if (s_config_window_started_us == 0) {
+        return 0;
+    }
+    int64_t elapsed_us = esp_timer_get_time() - s_config_window_started_us;
+    int64_t elapsed_s  = elapsed_us / 1000000;
+    if (elapsed_s >= LILUM_CONFIG_WINDOW_SEC) return 0;
+    return static_cast<uint8_t>(LILUM_CONFIG_WINDOW_SEC - elapsed_s);
 }
 
-uint32_t ble_ms_until_next_scan(void)
+static void apply_element_config_to_engine(const LilumElementConfig &cfg)
 {
-    // Follower scans continuously; always return 0.
+    // Minimum viable mapping: brightness is the most user-visible knob and is
+    // already a writable global in the LED engine. Reactive flags, button
+    // gestures and playlists are persisted but not yet wired through.
+    workingBrightness = cfg.startup_brightness;
+    g_manual_mode_active = (cfg.startup_mode == LILUM_STARTUP_MANUAL);
+    if (cfg.startup_mode == LILUM_STARTUP_AUTO && cfg.auto_playlist_len > 0) {
+        g_animation_mode = 0;  // start at first entry; cycling owned by led_engine
+    }
+    if (cfg.startup_mode == LILUM_STARTUP_MANUAL && cfg.manual_playlist_len > 0) {
+        g_manual_pattern = 0;
+    }
+}
+
+// ── Maintenance task ─────────────────────────────────────────────────────
+//
+// Runs once per second while the config window is open: updates the
+// "remaining seconds" field in the advertising payload (so the phone's
+// countdown stays accurate) and, when no phone has connected, triggers the
+// transition to the runtime state once the window expires.
+static void maintenance_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (s_state == BleStateMachine::ConfigAdv) {
+            uint8_t remaining = compute_remaining_seconds();
+            if (remaining == 0) {
+                ESP_LOGI(TAG, "Config window expired without a connection; entering runtime");
+                exit_to_runtime();
+                continue;
+            }
+            // The remaining-seconds countdown is now exposed via the FF15
+            // GATT "config info" characteristic (read on demand by the app);
+            // no need to rewrite advertising data every second.
+        }
+    }
+}
+
+// ── Runtime master adv refresh task ──────────────────────────────────────
+static void runtime_refresh_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        if (s_state == BleStateMachine::RuntimeMaster) {
+            start_runtime_master_adv();   // re-set data with fresh timestamp
+        }
+    }
+}
+
+// ── Advertising primitives ───────────────────────────────────────────────
+static void stop_all_radio(void)
+{
+    // With CONFIG_BT_NIMBLE_EXT_ADV=y all advertising (both legacy ADV_IND
+    // via legacy_pdu=1 and runtime extended adv) goes through the EXT_ADV
+    // instance, so a single stop suffices.
+    int rc = ble_gap_ext_adv_stop(kExtAdvInstance);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGD(TAG, "ext_adv_stop rc=%d", rc);
+    }
+    rc = ble_gap_disc_cancel();
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGD(TAG, "disc_cancel rc=%d", rc);
+    }
+    s_advertising = false;
+    s_scanning    = false;
+}
+
+static void start_config_window_adv(void)
+{
+    // Legacy ADV_IND (31-byte connectable + scannable) so iOS CoreBluetooth
+    // and stock BLE scanners (nRF Connect with default settings) can
+    // discover the pendant. The full 41-byte LilumConfigAdvPayload is
+    // exposed via the FF15 "config info" GATT characteristic after the
+    // phone connects.
+    //
+    // We use the EXT_ADV API with legacy_pdu=1 because the NimBLE host is
+    // built with CONFIG_BT_NIMBLE_EXT_ADV=y, which disables the legacy
+    // ble_gap_adv_start() entry point. legacy_pdu=1 + connectable=1 +
+    // scannable=1 produces standard ADV_IND PDUs on the wire.
+    //
+    // AD layout (≤ 31 bytes):
+    //   Flags             : 3 bytes  (1 len + 1 type + 1 value)
+    //   Complete UUID128  : 18 bytes (1 len + 1 type + 16 value)
+    //   Shortened name    : 10 bytes (1 len + 1 type + 8 chars "Mandalum")
+    //                       Total = 31 bytes.
+    struct ble_hs_adv_fields fields = {};
+    fields.flags        = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids128     = const_cast<ble_uuid128_t *>(&UUID_SVC_PRIMARY);
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+
+    static const char adv_name[] = "Mandalum";
+    fields.name = (uint8_t *)adv_name;
+    fields.name_len = strlen(adv_name);
+    fields.name_is_complete = 0;  // "Mandalum" is shorter than "Lilum Mandalum"
+
+    if (!s_advertising) {
+        ble_gap_ext_adv_stop(kExtAdvInstance);
+
+        struct ble_gap_ext_adv_params params = {};
+        params.connectable   = 1;
+        params.scannable     = 1;   // legacy ADV_IND requires scannable
+        params.legacy_pdu    = 1;   // produce legacy 31-byte PDUs
+        params.own_addr_type = s_own_addr_type;
+        params.primary_phy   = BLE_HCI_LE_PHY_1M;
+        params.secondary_phy = BLE_HCI_LE_PHY_1M;
+        params.tx_power      = 127;
+        params.sid           = 0;
+        params.itvl_min      = LILUM_ADV_ITVL_MIN_0_625;
+        params.itvl_max      = LILUM_ADV_ITVL_MAX_0_625;
+        params.channel_map   = 0x07;
+
+        int8_t selected_tx_power = 0;
+        int rc = ble_gap_ext_adv_configure(kExtAdvInstance, &params,
+                                           &selected_tx_power,
+                                           gap_event_cb, NULL);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ext_adv_configure(legacy) rc=%d", rc);
+            return;
+        }
+    }
+
+    struct os_mbuf *data = os_msys_get_pkthdr(BLE_HCI_MAX_ADV_DATA_LEN, 0);
+    if (!data) {
+        ESP_LOGE(TAG, "os_msys_get_pkthdr failed");
+        return;
+    }
+    int rc = ble_hs_adv_set_fields_mbuf(&fields, data);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_adv_set_fields_mbuf rc=%d", rc);
+        os_mbuf_free_chain(data);
+        return;
+    }
+    rc = ble_gap_ext_adv_set_data(kExtAdvInstance, data);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ext_adv_set_data(legacy) rc=%d", rc);
+        return;
+    }
+
+    if (!s_advertising) {
+        rc = ble_gap_ext_adv_start(kExtAdvInstance, 0, 0);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ext_adv_start(legacy) rc=%d", rc);
+            return;
+        }
+        s_advertising = true;
+        ESP_LOGI(TAG, "Config-window advertising started (legacy ADV_IND, remaining=%u s)",
+                 compute_remaining_seconds());
+    }
+}
+
+static void start_runtime_master_adv(void)
+{
+    LilumRuntimeAdvPayload payload = {};
+    payload.element_type_id_hash = LILUM_ELEMENT_TYPE_ID_HASH16;
+    if (!lilum_uuid_is_zero(s_binding.group_id)) {
+        payload.session_kind = 1;
+        memcpy(payload.session_id, s_binding.group_id, 16);
+    } else {
+        payload.session_kind = 0;
+        memcpy(payload.session_id, s_binding.pair_id, 16);
+    }
+    payload.sync_timestamp_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    payload.animation_index   = g_animation_mode;
+    payload.brightness        = workingBrightness;
+
+    uint8_t mfg_data[LILUM_ADV_RUNTIME_MFG_BYTES];
+    size_t mfg_len = lilum_encode_runtime_adv(mfg_data, sizeof(mfg_data), payload);
+    if (mfg_len != LILUM_ADV_RUNTIME_MFG_BYTES) {
+        ESP_LOGE(TAG, "encode_runtime_adv failed");
+        return;
+    }
+
+    struct ble_hs_adv_fields fields = {};
+    fields.flags        = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids128     = const_cast<ble_uuid128_t *>(&UUID_SVC_PRIMARY);
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+    fields.mfg_data     = mfg_data;
+    fields.mfg_data_len = static_cast<uint8_t>(mfg_len);
+
+    static const char adv_name[] = "Lilum Mandalum";
+    fields.name = (uint8_t *)adv_name;
+    fields.name_len = strlen(adv_name);
+    fields.name_is_complete = 1;
+
+    if (!s_advertising) {
+        ble_gap_ext_adv_stop(kExtAdvInstance);
+
+        struct ble_gap_ext_adv_params params = {};
+        params.connectable   = 0;
+        params.scannable     = 0;
+        params.legacy_pdu    = 0;
+        params.own_addr_type = s_own_addr_type;
+        params.primary_phy   = BLE_HCI_LE_PHY_1M;
+        params.secondary_phy = BLE_HCI_LE_PHY_1M;
+        params.sid           = 1;
+        params.itvl_min      = LILUM_ADV_ITVL_MIN_0_625;
+        params.itvl_max      = LILUM_ADV_ITVL_MAX_0_625;
+        params.channel_map   = 0x07;
+
+        int8_t selected = 0;
+        int rc = ble_gap_ext_adv_configure(kExtAdvInstance, &params, &selected,
+                                           gap_event_cb, NULL);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "runtime ext_adv_configure rc=%d", rc);
+            return;
+        }
+    }
+
+    struct os_mbuf *data = os_msys_get_pkthdr(BLE_HCI_MAX_ADV_DATA_LEN, 0);
+    if (!data) return;
+    if (ble_hs_adv_set_fields_mbuf(&fields, data) != 0) {
+        os_mbuf_free_chain(data);
+        return;
+    }
+    int rc = ble_gap_ext_adv_set_data(kExtAdvInstance, data);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "runtime ext_adv_set_data rc=%d", rc);
+        return;
+    }
+    if (!s_advertising) {
+        rc = ble_gap_ext_adv_start(kExtAdvInstance, 0, 0);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "runtime ext_adv_start rc=%d", rc);
+            return;
+        }
+        s_advertising = true;
+        ESP_LOGI(TAG, "Runtime master advertising started");
+    }
+}
+
+static void start_runtime_follower_scan(void)
+{
+    if (s_scanning) return;
+
+    struct ble_gap_disc_params dp = {};
+    dp.passive           = 1;
+    dp.itvl              = 0x0030;
+    dp.window            = 0x0030;
+    dp.filter_duplicates = 0;
+    int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &dp, gap_event_cb, NULL);
+    if (rc == 0) {
+        s_scanning = true;
+        ESP_LOGI(TAG, "Runtime follower scan started");
+    } else if (rc != BLE_HS_EALREADY) {
+        ESP_LOGE(TAG, "follower scan start failed: %d", rc);
+    }
+}
+
+// ── State transitions ────────────────────────────────────────────────────
+static void enter_config_adv_window(void)
+{
+    s_state = BleStateMachine::ConfigAdv;
+    s_config_window_started_us = esp_timer_get_time();
+    s_config_window_paused = false;
+    s_config_window_paused_remaining_sec = 0;
+    start_config_window_adv();
+    if (!s_maintenance_task) {
+        xTaskCreate(maintenance_task, "BLE Maint", 3072, NULL, 4, &s_maintenance_task);
+    }
+}
+
+static void enter_runtime_master(void)
+{
+    ESP_LOGI(TAG, "→ Runtime MASTER");
+    s_state = BleStateMachine::RuntimeMaster;
+    stop_all_radio();
+    start_runtime_master_adv();
+    if (!s_runtime_refresh_task) {
+        xTaskCreate(runtime_refresh_task, "BLE RtMaster", 3072, NULL, 4, &s_runtime_refresh_task);
+    }
+}
+
+static void enter_runtime_follower(void)
+{
+    ESP_LOGI(TAG, "→ Runtime FOLLOWER");
+    s_state = BleStateMachine::RuntimeFollower;
+    s_follower_synced = false;
+    stop_all_radio();
+    start_runtime_follower_scan();
+}
+
+static void enter_runtime_idle(void)
+{
+    ESP_LOGI(TAG, "→ Runtime IDLE (standalone)");
+    s_state = BleStateMachine::RuntimeIdle;
+    stop_all_radio();
+}
+
+static void exit_to_runtime(void)
+{
+    // Decide our runtime duty from the current binding (PRD §5.5).
+    const bool in_group = !lilum_uuid_is_zero(s_binding.group_id);
+    const bool in_pair  = !lilum_uuid_is_zero(s_binding.pair_id);
+
+    if (in_group) {
+        if (s_binding.group_role == LILUM_GROUP_ROLE_MASTER) {
+            enter_runtime_master();
+        } else if (in_pair && s_binding.pair_role == LILUM_PAIR_ROLE_MASTER) {
+            // Group-follower that is also pair-master: act as pair-master so
+            // its pair-follower mirrors it locally. (Group-master, if it
+            // comes online, will eventually snap-to-master per PRD §5.6.)
+            enter_runtime_master();
+        } else {
+            enter_runtime_follower();
+        }
+    } else if (in_pair) {
+        if (s_binding.pair_role == LILUM_PAIR_ROLE_MASTER) {
+            enter_runtime_master();
+        } else {
+            enter_runtime_follower();
+        }
+    } else {
+        enter_runtime_idle();
+    }
+}
+
+// ── GATT access callbacks ────────────────────────────────────────────────
+static int read_str(struct ble_gatt_access_ctxt *ctxt, const char *s)
+{
+    return os_mbuf_append(ctxt->om, s, strlen(s)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+static int read_bytes(struct ble_gatt_access_ctxt *ctxt, const void *p, size_t n)
+{
+    return os_mbuf_append(ctxt->om, p, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+static int ident_type_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+    return read_str(ctxt, LILUM_ELEMENT_TYPE_ID);
+}
+static int ident_fwver_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+    uint8_t v[3] = { LILUM_FW_VERSION_MAJOR, LILUM_FW_VERSION_MINOR, LILUM_FW_VERSION_PATCH };
+    return read_bytes(ctxt, v, sizeof(v));
+}
+static int ident_hwrev_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+    return read_str(ctxt, LILUM_HARDWARE_REVISION);
+}
+static int ident_serial_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+    return read_str(ctxt, LILUM_SERIAL_NUMBER);
+}
+// Returns the full 41-byte LilumConfigAdvPayload (company id + kind tag +
+// protocol §3.1 body). Replaces the same payload that previously appeared
+// as the manufacturer-specific data field of the BLE 5 extended config-
+// window advertisement. Only meaningful while the configuration window is
+// open; outside of it the body is still well-formed but the
+// `config_window_remaining_sec` field reads 0.
+static int ident_cfginfo_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+
+    LilumConfigAdvPayload payload = {};
+    payload.element_type_id_hash        = LILUM_ELEMENT_TYPE_ID_HASH16;
+    memcpy(payload.pair_id,  s_binding.pair_id,  16);
+    memcpy(payload.group_id, s_binding.group_id, 16);
+    payload.firmware_major              = LILUM_FW_VERSION_MAJOR;
+    payload.firmware_minor              = LILUM_FW_VERSION_MINOR;
+    payload.firmware_patch              = LILUM_FW_VERSION_PATCH;
+    payload.config_window_remaining_sec = compute_remaining_seconds();
+
+    uint8_t buf[LILUM_ADV_CONFIG_MFG_BYTES];
+    size_t  len = lilum_encode_config_adv(buf, sizeof(buf), payload);
+    if (len != LILUM_ADV_CONFIG_MFG_BYTES) return BLE_ATT_ERR_UNLIKELY;
+    return read_bytes(ctxt, buf, len);
+}
+
+// Binding service — generic getter/setter for the small fields.
+static int bind_pair_id_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return read_bytes(ctxt, s_binding.pair_id, 16);
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 16) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint16_t out = 0;
+        ble_hs_mbuf_to_flat(ctxt->om, s_binding.pair_id, 16, &out);
+        if (lilum_uuid_is_zero(s_binding.pair_id)) s_binding.pair_role = LILUM_PAIR_ROLE_NONE;
+        lilum_nvs_save_binding(&s_binding);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+static int bind_pair_role_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) return read_bytes(ctxt, &s_binding.pair_role, 1);
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 1) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint8_t v = 0; uint16_t out = 0;
+        ble_hs_mbuf_to_flat(ctxt->om, &v, 1, &out);
+        if (v > LILUM_PAIR_ROLE_FOLLOWER) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        s_binding.pair_role = v;
+        lilum_nvs_save_binding(&s_binding);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+static int bind_group_id_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) return read_bytes(ctxt, s_binding.group_id, 16);
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 16) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint16_t out = 0;
+        ble_hs_mbuf_to_flat(ctxt->om, s_binding.group_id, 16, &out);
+        lilum_nvs_save_binding(&s_binding);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+static int bind_group_role_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) return read_bytes(ctxt, &s_binding.group_role, 1);
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 1) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint8_t v = 0; uint16_t out = 0;
+        ble_hs_mbuf_to_flat(ctxt->om, &v, 1, &out);
+        if (v > LILUM_GROUP_ROLE_MASTER) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        s_binding.group_role = v;
+        lilum_nvs_save_binding(&s_binding);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+static int bind_slot_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) return read_bytes(ctxt, &s_binding.group_slot_index, 1);
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 1) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        uint8_t v = 0; uint16_t out = 0;
+        ble_hs_mbuf_to_flat(ctxt->om, &v, 1, &out);
+        if (v > 5) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        s_binding.group_slot_index = v;
+        lilum_nvs_save_binding(&s_binding);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+// Configuration service.
+static int cfg_blob_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    uint16_t total = OS_MBUF_PKTLEN(ctxt->om);
+    if (total < 14 || total > LILUM_CONFIG_BLOB_MAX_LEN) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    uint8_t flat[LILUM_CONFIG_BLOB_MAX_LEN];
+    uint16_t out_len = 0;
+    if (ble_hs_mbuf_to_flat(ctxt->om, flat, sizeof(flat), &out_len) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    LilumElementConfig tmp;
+    size_t consumed = lilum_config_decode(flat, out_len, &tmp);
+    if (consumed == 0) {
+        ESP_LOGW(TAG, "config blob rejected (len=%u)", out_len);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    s_element_cfg = tmp;
+    lilum_nvs_save_element_config(&s_element_cfg);
+    apply_element_config_to_engine(s_element_cfg);
+    ESP_LOGI(TAG, "ElementConfig applied (auto=%u, manual=%u entries)",
+             s_element_cfg.auto_playlist_len, s_element_cfg.manual_playlist_len);
     return 0;
 }
 
-bool ble_is_currently_advertising(void)
+// Live Command service.
+static int live_brightness_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
 {
-    return ble_advertising;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    if (OS_MBUF_PKTLEN(ctxt->om) != 1) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    uint8_t v = 0; uint16_t out = 0;
+    ble_hs_mbuf_to_flat(ctxt->om, &v, 1, &out);
+    if (v > 100) v = 100;
+    s_live_brightness_override = v;
+    workingBrightness = v;
+    return 0;
+}
+static int live_preview_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    if (OS_MBUF_PKTLEN(ctxt->om) != LILUM_ANIM_TUPLE_BYTES) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    LilumAnimationTuple t;
+    uint16_t out = 0;
+    ble_hs_mbuf_to_flat(ctxt->om, &t, sizeof(t), &out);
+    // For now: just log the preview request; full animation engine wiring is a
+    // separate piece of work.
+    ESP_LOGI(TAG, "previewAnimation base=%u sym=%u p={%u,%u,%u,%u,%u,%u}",
+             t.base, t.symmetry, t.params[0], t.params[1], t.params[2],
+             t.params[3], t.params[4], t.params[5]);
+    g_animation_mode = t.base;
+    return 0;
+}
+static int live_flashlight_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    if (OS_MBUF_PKTLEN(ctxt->om) != 5) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    uint8_t buf[5]; uint16_t out = 0;
+    ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &out);
+    led_engine_set_white_mode(true);
+    workingBrightness = buf[4] > 100 ? 100 : buf[4];
+    return 0;
+}
+static int live_applyexit_cb(uint16_t, uint16_t, struct ble_gatt_access_ctxt *ctxt, void *)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    ESP_LOGI(TAG, "applyConfigAndExitWindow received");
+    // Persist any pending state and disconnect; gap_event_cb's disconnect path
+    // will pick up exit_to_runtime().
+    lilum_nvs_save_binding(&s_binding);
+    lilum_nvs_save_element_config(&s_element_cfg);
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    } else {
+        exit_to_runtime();
+    }
+    return 0;
 }
 
-bool ble_is_currently_scanning(void)
-{
-    return ble_scanning;
-}
-
-// Animation mode is owned by sketch.cpp and shared with BLE.
-extern uint8_t g_animation_mode;
-
-// Custom 128-bit UUIDs
-static const ble_uuid128_t svc_uuid = {
-    { BLE_UUID_TYPE_128 },
-    { 0xab, 0x90, 0x78, 0x56,
-      0x34, 0x12, 0x34, 0x12,
-      0x34, 0x12, 0x34, 0x12,
-      0x78, 0x56, 0x34, 0x12 }
-};
-
-static const ble_uuid128_t chr_uuid = {
-    { BLE_UUID_TYPE_128 },
-    { 0xac, 0x90, 0x78, 0x56,
-      0x34, 0x12, 0x34, 0x12,
-      0x34, 0x12, 0x34, 0x12,
-      0x78, 0x56, 0x34, 0x12 }
-};
-
-static uint16_t mode_chr_handle;
-static uint8_t own_addr_type;
-static SemaphoreHandle_t ble_host_stopped_sem = NULL;  // Signalled by host task just before it exits
-
-// Forward declarations
-
-static void ble_app_advertise(void); // Starts BLE advertising with the current timing window configuration.
-static int ble_gap_event(struct ble_gap_event *event, void *arg); // Handles GAP events such as connect, disconnect, and advertising completion.
-// Implements GATT characteristic read/write access for animation mode.
-static int mode_chr_access(uint16_t conn_handle,
-                           uint16_t attr_handle,
-                           struct ble_gatt_access_ctxt *ctxt,
-                           void *arg);
-static void ble_app_on_sync(void); // Runs when the BLE host is synchronized and ready to begin advertising.
-static void ble_app_on_reset(int reason); // Logs BLE host reset reasons for diagnostics.
-static void ble_host_task(void *param); // NimBLE host task entry point that runs the BLE host loop.
-static void ble_deinit_and_restart_task(void *param); // One-shot task that deinitializes BLE, waits, then reinitializes BLE.
-static uint32_t ble_get_sync_timestamp_ms(void); // Monotonic timestamp used as the sync reference in advertising.
-static bool ble_is_sync_source(const OrchestraAdvPayload &payload); // Checks whether an advertisement came from the configured master.
-static void ble_apply_master_packet(const OrchestraAdvPayload &payload); // Updates follower sync and animation based on master packet.
-static void ble_follower_scan_scheduler_task(void *param); // Starts continuous BLE scanning for the follower.
-static void ble_start_continuous_scan(void); // Starts a continuous passive BLE scan (BLE_HS_FOREVER).
-static void ble_master_adv_refresh_task(void *param); // Refreshes adv payload when animation mode changes.
-static void ble_update_adv_payload(void); // Updates adv data in-place with current mode and timestamp.
-
+// ── GATT services table ──────────────────────────────────────────────────
 static const struct ble_gatt_svc_def gatt_svcs[] = {
+    // Identity
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &svc_uuid.u,
-        .includes = NULL,
+        .uuid = &UUID_SVC_IDENTITY.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
-            {
-                .uuid = &chr_uuid.u,
-                .access_cb = mode_chr_access,
-                .arg = NULL,
-                .descriptors = NULL,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
-                .min_key_size = 0,
-                .val_handle = &mode_chr_handle,
-            },
-            {0} // end of characteristics
+            { .uuid = &UUID_ID_TYPE.u,   .access_cb = ident_type_cb,   .flags = BLE_GATT_CHR_F_READ },
+            { .uuid = &UUID_ID_FWVER.u,  .access_cb = ident_fwver_cb,  .flags = BLE_GATT_CHR_F_READ },
+            { .uuid = &UUID_ID_HWREV.u,  .access_cb = ident_hwrev_cb,  .flags = BLE_GATT_CHR_F_READ },
+            { .uuid = &UUID_ID_SERIAL.u, .access_cb = ident_serial_cb, .flags = BLE_GATT_CHR_F_READ },
+            { .uuid = &UUID_ID_CFGINFO.u,.access_cb = ident_cfginfo_cb,.flags = BLE_GATT_CHR_F_READ },
+            { 0 }
         },
     },
-    {0} // end of services
+    // Binding
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &UUID_SVC_BINDING.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            { .uuid = &UUID_BIND_PAIR_ID.u,    .access_cb = bind_pair_id_cb,    .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE },
+            { .uuid = &UUID_BIND_PAIR_ROLE.u,  .access_cb = bind_pair_role_cb,  .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE },
+            { .uuid = &UUID_BIND_GROUP_ID.u,   .access_cb = bind_group_id_cb,   .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE },
+            { .uuid = &UUID_BIND_GROUP_ROLE.u, .access_cb = bind_group_role_cb, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE },
+            { .uuid = &UUID_BIND_SLOT.u,       .access_cb = bind_slot_cb,       .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE },
+            { 0 }
+        },
+    },
+    // Configuration
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &UUID_SVC_CONFIG.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            { .uuid = &UUID_CFG_STANDALONE.u, .access_cb = cfg_blob_cb, .flags = BLE_GATT_CHR_F_WRITE },
+            { .uuid = &UUID_CFG_SHARED.u,     .access_cb = cfg_blob_cb, .flags = BLE_GATT_CHR_F_WRITE },
+            { 0 }
+        },
+    },
+    // Live Command
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &UUID_SVC_LIVE.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            { .uuid = &UUID_LIVE_BRIGHTNESS.u, .access_cb = live_brightness_cb, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+            { .uuid = &UUID_LIVE_PREVIEW.u,    .access_cb = live_preview_cb,    .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+            { .uuid = &UUID_LIVE_FLASHLIGHT.u, .access_cb = live_flashlight_cb, .flags = BLE_GATT_CHR_F_WRITE_NO_RSP },
+            { .uuid = &UUID_LIVE_APPLYEXIT.u,  .access_cb = live_applyexit_cb,  .flags = BLE_GATT_CHR_F_WRITE },
+            { 0 }
+        },
+    },
+    { 0 }
 };
 
-static uint32_t ble_get_sync_timestamp_ms(void)
-{
-    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-}
-
-static bool ble_is_sync_source(const OrchestraAdvPayload &payload)
-{
-    const bool role_ok = payload.role == OrchestraRole::Master;
-    const bool group_ok = payload.group_id == ORCHESTRA_GROUP_ID;
-    const bool device_ok = payload.device_id == ORCHESTRA_MASTER_ID;
-    return role_ok && group_ok && device_ok;
-}
-
-static void ble_apply_master_packet(const OrchestraAdvPayload &payload)
-{
-    const uint32_t now_ms = ble_get_sync_timestamp_ms();
-    follower_master_offset_ms = static_cast<int64_t>(now_ms) - static_cast<int64_t>(payload.sync_timestamp_ms);
-
-    if (!follower_synced) {
-        follower_synced = true;
-        follower_ever_synced = true;
-        ESP_LOGI(TAG,
-                 "Follower synced to master device=%u group=%u master_ts=%lu local_ts=%lu offset=%lld",
-                 payload.device_id,
-                 payload.group_id,
-                 static_cast<unsigned long>(payload.sync_timestamp_ms),
-                 static_cast<unsigned long>(now_ms),
-                 static_cast<long long>(follower_master_offset_ms));
-    }
-
-    master_heard_in_scan = true;
-    last_master_heard_local_ms = now_ms;
-
-    if (g_animation_mode != payload.animation_mode) {
-        g_animation_mode = payload.animation_mode;
-        ESP_LOGI(TAG, "Animation updated by master to mode=%u", g_animation_mode);
-    }
-}
-
-// Starts a continuous passive scan (BLE_HS_FOREVER).
-// Called once at startup and re-called from BLE_GAP_EVENT_DISC_COMPLETE
-// if the scan ends for any reason.
-static void ble_start_continuous_scan(void)
-{
-    struct ble_gap_disc_params disc_params;
-    memset(&disc_params, 0, sizeof(disc_params));
-
-    disc_params.passive = 1;
-    disc_params.itvl = 0x0030;
-    disc_params.window = 0x0030;
-    disc_params.filter_duplicates = 0;
-
-    int rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER, &disc_params, ble_gap_event, NULL);
-    if (rc == 0) {
-        ble_scanning = true;
-        ESP_LOGI(TAG, "Continuous follower scan ACTIVE");
-        return;
-    }
-    if (rc == BLE_HS_EALREADY) {
-        ESP_LOGW(TAG, "Scan already active (BLE_HS_EALREADY)");
-        return;
-    }
-    ESP_LOGE(TAG, "ble_gap_disc FAILED: rc=%d", rc);
-}
-
-static void ble_follower_scan_scheduler_task(void *param)
-{
-    (void)param;
-    ESP_LOGI(TAG, ">>> FOLLOWER CONTINUOUS SCAN TASK STARTED <<<");
-    vTaskDelay(pdMS_TO_TICKS(100));  // Let BLE host fully initialize
-
-    ble_start_continuous_scan();
-
-    // Task stays alive so the handle remains valid, but has nothing else to do.
-    // The scan restarts from BLE_GAP_EVENT_DISC_COMPLETE if it ever stops.
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
-    }
-}
-
-static int mode_chr_access(uint16_t conn_handle,
-                           uint16_t attr_handle,
-                           struct ble_gatt_access_ctxt *ctxt,
-                           void *arg)
-{
-    (void)conn_handle;
-    (void)attr_handle;
-    (void)arg;
-
-    // Reset inactivity timer on any GATT access
-    gatt_inactivity_timer_reset();
-    switch (ctxt->op) {
-        case BLE_GATT_ACCESS_OP_READ_CHR: {
-            int rc = os_mbuf_append(ctxt->om,
-                                    reinterpret_cast<const void *>(&g_animation_mode),
-                                    sizeof(g_animation_mode));
-            if (rc != 0) {
-                return BLE_ATT_ERR_INSUFFICIENT_RES;
-            }
-
-            ESP_LOGI(TAG, "Read mode = %u", g_animation_mode);
-            return 0;
-        }
-
-        case BLE_GATT_ACCESS_OP_WRITE_CHR: {
-            uint8_t new_mode = 0;
-            uint16_t out_len = 0;
-
-            if (ORCHESTRA_ROLE != OrchestraRole::Master) {
-                return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-            }
-
-            if (OS_MBUF_PKTLEN(ctxt->om) != 1) {
-                return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-            }
-
-            int rc = ble_hs_mbuf_to_flat(ctxt->om,
-                                         &new_mode,
-                                         sizeof(new_mode),
-                                         &out_len);
-            if (rc != 0 || out_len != 1) {
-                return BLE_ATT_ERR_UNLIKELY;
-            }
-
-            g_animation_mode = new_mode;
-            ESP_LOGI(TAG, "Wrote mode = %u", g_animation_mode);
-            return 0;
-        }
-
-        default:
-            return BLE_ATT_ERR_UNLIKELY;
-    }
-}
-
-static int ble_gap_event(struct ble_gap_event *event, void *arg)
+// ── GAP events ───────────────────────────────────────────────────────────
+static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
-
     switch (event->type) {
+        case BLE_GAP_EVENT_CONNECT: {
+            if (event->connect.status != 0) {
+                ESP_LOGW(TAG, "connect failed: status=%d", event->connect.status);
+                if (s_state == BleStateMachine::ConfigAdv) start_config_window_adv();
+                return 0;
+            }
+            s_conn_handle = event->connect.conn_handle;
+            s_connected = true;
+            s_advertising = false;
+            s_config_window_paused_remaining_sec = compute_remaining_seconds();
+            s_config_window_paused = true;
+            s_state = BleStateMachine::ConfigConnected;
+            ESP_LOGI(TAG, "Phone connected; config window paused at %u s",
+                     s_config_window_paused_remaining_sec);
+            // Negotiate high connection priority + larger MTU per protocol §8.
+            struct ble_gap_upd_params p = {};
+            p.itvl_min = 12;   // 15 ms
+            p.itvl_max = 12;
+            p.latency  = 0;
+            p.supervision_timeout = 400;  // 4 s
+            ble_gap_update_params(s_conn_handle, &p);
+            ble_gattc_exchange_mtu(s_conn_handle, NULL, NULL);
+            return 0;
+        }
+
+        case BLE_GAP_EVENT_DISCONNECT: {
+            ESP_LOGI(TAG, "Phone disconnected; reason=%d", event->disconnect.reason);
+            s_connected = false;
+            s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            // Per PRD §4.4 Option C: a disconnect ends the session
+            // regardless of cause. Transition to runtime duty.
+            exit_to_runtime();
+            return 0;
+        }
+
+        case BLE_GAP_EVENT_ADV_COMPLETE:
+            s_advertising = false;
+            return 0;
+
         case BLE_GAP_EVENT_DISC: {
-            struct ble_hs_adv_fields adv_fields;
-            memset(&adv_fields, 0, sizeof(adv_fields));
-
-            // Count all received advertisements
-            scan_adv_count++;
-            // Log non-orchestra advertisements at DEBUG level only
-            ESP_LOGD(TAG, "ADV RX (#%lu): addr=%02x:%02x:%02x:%02x:%02x:%02x rssi=%d len=%u",
-                     static_cast<unsigned long>(scan_adv_count),
-                     event->disc.addr.val[0], event->disc.addr.val[1],
-                     event->disc.addr.val[2], event->disc.addr.val[3],
-                     event->disc.addr.val[4], event->disc.addr.val[5],
-                     event->disc.rssi, event->disc.length_data);
-
-            int rc = ble_hs_adv_parse_fields(&adv_fields,
-                                             event->disc.data,
-                                             event->disc.length_data);
-            if (rc != 0 || !adv_fields.mfg_data || adv_fields.mfg_data_len == 0) {
+            // Runtime follower path: parse manufacturer data and apply.
+            if (s_state != BleStateMachine::RuntimeFollower) return 0;
+            struct ble_hs_adv_fields f = {};
+            if (ble_hs_adv_parse_fields(&f, event->disc.data, event->disc.length_data) != 0) {
                 return 0;
             }
+            if (!f.mfg_data || f.mfg_data_len < LILUM_ADV_RUNTIME_MFG_BYTES) return 0;
+            if (lilum_adv_kind(f.mfg_data, f.mfg_data_len) != LILUM_ADV_KIND_RUNTIME) return 0;
+            LilumRuntimeAdvPayload p;
+            if (!lilum_decode_runtime_adv(f.mfg_data, f.mfg_data_len, &p)) return 0;
+            if (p.element_type_id_hash != LILUM_ELEMENT_TYPE_ID_HASH16) return 0;
 
-            OrchestraAdvPayload payload;
-            if (!orchestra_decode_adv_payload(reinterpret_cast<const uint8_t *>(adv_fields.mfg_data),
-                                              adv_fields.mfg_data_len,
-                                              &payload)) {
-                return 0;
+            // Only follow our own group / pair.
+            const bool in_group = !lilum_uuid_is_zero(s_binding.group_id);
+            const uint8_t *session = in_group ? s_binding.group_id : s_binding.pair_id;
+            const uint8_t expected_kind = in_group ? 1 : 0;
+            if (p.session_kind != expected_kind) return 0;
+            if (memcmp(p.session_id, session, 16) != 0) return 0;
+
+            s_follower_synced = true;
+            if (g_animation_mode != p.animation_index) {
+                g_animation_mode = p.animation_index;
             }
-
-            if (ble_is_sync_source(payload)) {
-                if (!master_heard_in_scan) {
-                    ESP_LOGI(TAG, "Orchestra ADV (sync): dev=%u ts=%lu anim=%u",
-                             payload.device_id,
-                             static_cast<unsigned long>(payload.sync_timestamp_ms),
-                             payload.animation_mode);
-                }
-                ble_apply_master_packet(payload);
-            } else {
-                ESP_LOGD(TAG, "Orchestra ADV (other): role=%u group=%u dev=%u master=%u",
-                         static_cast<uint8_t>(payload.role), payload.group_id,
-                         payload.device_id, payload.master_id);
+            if (workingBrightness != p.brightness && p.brightness > 0) {
+                workingBrightness = p.brightness;
             }
             return 0;
         }
 
         case BLE_GAP_EVENT_DISC_COMPLETE:
-            ble_scanning = false;
-            ESP_LOGI(TAG, "Scan completed (adverts RX: %lu) — restarting continuous scan",
-                     static_cast<unsigned long>(scan_adv_count));
-            master_heard_in_scan = false;
-            scan_adv_count = 0;
-            // Immediately restart scanning so the follower never stops listening
-            if (ORCHESTRA_ROLE == OrchestraRole::Follower) {
-                ble_start_continuous_scan();
+            s_scanning = false;
+            if (s_state == BleStateMachine::RuntimeFollower) {
+                start_runtime_follower_scan();
             }
-            return 0;
-
-        case BLE_GAP_EVENT_CONNECT:
-            if (event->connect.status == 0) {
-                ble_connected = true;
-                ble_advertising = false;
-                ESP_LOGI(TAG, "BLE connected");
-                // Cancel advertising timeout – device is connected now
-                if (adv_timeout_timer) {
-                    xTimerStop(adv_timeout_timer, 0);
-                }
-                gatt_inactivity_timer_reset();
-            } else {
-                if (ORCHESTRA_ROLE == OrchestraRole::Master) {
-                    ESP_LOGW(TAG, "BLE connect failed; restarting advertising");
-                    ble_app_advertise();
-                }
-            }
-            return 0;
-
-        case BLE_GAP_EVENT_DISCONNECT:
-            ble_connected = false;
-            ESP_LOGI(TAG, "BLE disconnected; reason=%d", event->disconnect.reason);
-            if (gatt_inactivity_timer) {
-                xTimerStop(gatt_inactivity_timer, 0);
-            }
-            if (ORCHESTRA_ROLE == OrchestraRole::Master) {
-                ble_app_advertise();
-            }
-            return 0;
-
-        case BLE_GAP_EVENT_ADV_COMPLETE:
-            ble_advertising = false;
-            if (ORCHESTRA_ROLE != OrchestraRole::Master) {
-                return 0;
-            }
-
-            if (ble_connected) {
-                // A connection was made during the advertising window; stack stays up
-                ESP_LOGI(TAG, "Advertising complete (connection active)");
-            } else {
-                // No connection was established during the advertising window.
-                // Tear down the BLE stack permanently to save power.
-                ESP_LOGI(TAG, "Advertising complete with no connection; tearing down BLE permanently");
-                orchestra_ble_deinit();
-            }
-            return 0;
-
-        case BLE_GAP_EVENT_SUBSCRIBE:
-            ESP_LOGI(TAG, "Subscribe event");
             return 0;
 
         case BLE_GAP_EVENT_MTU:
-            ESP_LOGI(TAG, "MTU updated; value=%d", event->mtu.value);
+            ESP_LOGI(TAG, "MTU negotiated: %u", event->mtu.value);
             return 0;
 
         default:
@@ -435,346 +854,69 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     }
 }
 
-// Updates the advertising payload with the current animation mode and timestamp
-// while the master is already advertising. Safe to call at any time.
-static void ble_update_adv_payload(void)
+// ── Host bring-up ────────────────────────────────────────────────────────
+static void on_host_sync(void)
 {
-    if (!ble_initialized || !ble_advertising) {
-        return;
-    }
-
-    struct ble_hs_adv_fields fields;
-    uint8_t orchestra_adv_data[ORCHESTRA_ADV_PAYLOAD_LEN] = {0};
-    uint32_t sync_timestamp_ms = ble_get_sync_timestamp_ms();
-
-    memset(&fields, 0, sizeof(fields));
-
-    static const char short_name[] = "Pend-01";
-    fields.name = (uint8_t *)short_name;
-    fields.name_len = (uint8_t)strlen(short_name);
-    fields.name_is_complete = 0;
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-
-    OrchestraAdvPayload payload = {
-        .group_id = ORCHESTRA_GROUP_ID,
-        .device_id = ORCHESTRA_DEVICE_ID,
-        .role = ORCHESTRA_ROLE,
-        .position = ORCHESTRA_POSITION,
-        .master_id = ORCHESTRA_MASTER_ID,
-        .sync_timestamp_ms = sync_timestamp_ms,
-        .animation_mode = g_animation_mode,
-    };
-
-    size_t len = orchestra_encode_adv_payload(orchestra_adv_data, sizeof(orchestra_adv_data), payload);
-    if (len != ORCHESTRA_ADV_PAYLOAD_LEN) {
-        return;
-    }
-
-    fields.mfg_data = orchestra_adv_data;
-    fields.mfg_data_len = static_cast<uint8_t>(len);
-
-    int rc = ble_gap_adv_set_fields(&fields);
+    ESP_LOGI(TAG, "host synchronized");
+    int rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) {
-        ESP_LOGE(TAG, "adv payload refresh failed: %d", rc);
+        ESP_LOGE(TAG, "ensure_addr rc=%d", rc);
         return;
     }
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "infer_auto rc=%d", rc);
+        return;
+    }
+    uint8_t addr[6] = {0};
+    ble_hs_id_copy_addr(s_own_addr_type, addr, NULL);
+    ESP_LOGI(TAG, "BLE addr %02X:%02X:%02X:%02X:%02X:%02X",
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
 
-    last_advertised_mode = g_animation_mode;
-    ESP_LOGI(TAG, "Adv payload refreshed: anim=%u ts=%lu", g_animation_mode,
-             static_cast<unsigned long>(sync_timestamp_ms));
+    enter_config_adv_window();
 }
 
-// Runs while the master is advertising; checks if animation mode changed
-// and refreshes the adv payload if so.
-static void ble_master_adv_refresh_task(void *param)
+static void on_host_reset(int reason)
 {
-    (void)param;
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-        if (!ble_initialized || !ble_advertising) {
-            continue;
-        }
-        // Always refresh so the timestamp stays current for followers.
-        ble_update_adv_payload();
-    }
+    ESP_LOGE(TAG, "BLE host reset; reason=%d", reason);
 }
 
-static void ble_app_advertise(void)
-{
-    if (ORCHESTRA_ROLE != OrchestraRole::Master) {
-        return;
-    }
-
-    struct ble_gap_adv_params adv_params;
-    struct ble_hs_adv_fields fields;
-    struct ble_hs_adv_fields rsp_fields;
-    uint8_t orchestra_adv_data[ORCHESTRA_ADV_PAYLOAD_LEN] = {0};
-    uint32_t sync_timestamp_ms = ble_get_sync_timestamp_ms();
-    int adv_duration_ms = ble_startup_cycle_complete ? BLE_CYCLE_ADV_MS : BLE_STARTUP_ADV_MS;
-    // Use BLE_HS_FOREVER for NimBLE because the payload-refresh task calls
-    // ble_gap_adv_set_fields() every 500 ms which resets the NimBLE duration
-    // counter.  The actual timeout is enforced by adv_timeout_timer instead.
-    int nimble_duration = BLE_HS_FOREVER;
-
-    // Cycle animation mode at the start of each post-startup advertising window
-    // so the mode change is always visible to followers.
-    if (ble_startup_cycle_complete) {
-        g_animation_mode = (g_animation_mode + 1) % led_engine_get_num_auto_patterns();
-        ESP_LOGI(TAG, "Master animation mode cycled to %u", g_animation_mode);
-    }
-
-    memset(&fields, 0, sizeof(fields));
-    memset(&rsp_fields, 0, sizeof(rsp_fields));
-
-    // Keep primary ADV packet compact (31-byte limit); place the full name in scan response.
-    const char *name = ble_svc_gap_device_name();
-    static const char short_name[] = "Pend-01";
-    fields.name = (uint8_t *)short_name;
-    fields.name_len = (uint8_t)strlen(short_name);
-    fields.name_is_complete = 0;
-    rsp_fields.name = (uint8_t *)name;
-    rsp_fields.name_len = (uint8_t)strlen(name);
-    rsp_fields.name_is_complete = 1;
-
-    // General discoverable + BLE only
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-
-    OrchestraAdvPayload payload = {
-        .group_id = ORCHESTRA_GROUP_ID,
-        .device_id = ORCHESTRA_DEVICE_ID,
-        .role = ORCHESTRA_ROLE,
-        .position = ORCHESTRA_POSITION,
-        .master_id = ORCHESTRA_MASTER_ID,
-        .sync_timestamp_ms = sync_timestamp_ms,
-        .animation_mode = g_animation_mode,
-    };
-
-    size_t orchestra_adv_data_len = orchestra_encode_adv_payload(orchestra_adv_data,
-                                                                 sizeof(orchestra_adv_data),
-                                                                 payload);
-    if (orchestra_adv_data_len != ORCHESTRA_ADV_PAYLOAD_LEN) {
-        ESP_LOGE(TAG, "Failed to build orchestra advertising payload");
-        return;
-    }
-
-    fields.mfg_data = orchestra_adv_data;
-    fields.mfg_data_len = static_cast<uint8_t>(orchestra_adv_data_len);
-
-    int rc = ble_gap_adv_set_fields(&fields);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
-        return;
-    }
-
-    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gap_adv_rsp_set_fields failed: %d", rc);
-        return;
-    }
-
-    memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-
-    rc = ble_gap_adv_start(own_addr_type,
-                           NULL,
-                           nimble_duration,
-                           &adv_params,
-                           ble_gap_event,
-                           NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
-        return;
-    }
-
-    ble_advertising = true;
-    last_advertised_mode = g_animation_mode;
-
-    // Start (or restart) the software timer that enforces the advertising window
-    if (adv_timeout_timer) {
-        xTimerStop(adv_timeout_timer, 0);
-        xTimerChangePeriod(adv_timeout_timer, pdMS_TO_TICKS(adv_duration_ms), 0);
-        xTimerStart(adv_timeout_timer, 0);
-    }
-
-    ESP_LOGI(TAG,
-             "Advertising started for %d ms (group=%u device=%u role=%s position=%d master=%u ts_ms=%lu anim=%u)",
-             adv_duration_ms,
-             ORCHESTRA_GROUP_ID,
-             ORCHESTRA_DEVICE_ID,
-             orchestra_role_to_string(ORCHESTRA_ROLE),
-             ORCHESTRA_POSITION,
-             ORCHESTRA_MASTER_ID,
-             static_cast<unsigned long>(sync_timestamp_ms),
-             g_animation_mode);
-}
-
-static void ble_app_on_sync(void)
-{
-    ESP_LOGI(TAG, ">>> BLE HOST SYNCHRONIZED <<<");
-    
-    int rc = ble_hs_id_infer_auto(0, &own_addr_type);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
-        return;
-    }
-
-    uint8_t addr_val[6] = {0};
-    rc = ble_hs_id_copy_addr(own_addr_type, addr_val, NULL);
-    if (rc == 0) {
-        // Create GATT inactivity timer (master only)
-        if (ORCHESTRA_ROLE == OrchestraRole::Master && !gatt_inactivity_timer) {
-            gatt_inactivity_timer = xTimerCreate("GATT Inactivity", pdMS_TO_TICKS(BLE_GATT_INACTIVITY_TIMEOUT_MS), pdFALSE, NULL, gatt_inactivity_timeout_cb);
-        }
-        // Create advertising timeout timer (master only)
-        if (ORCHESTRA_ROLE == OrchestraRole::Master && !adv_timeout_timer) {
-            adv_timeout_timer = xTimerCreate("Adv Timeout", pdMS_TO_TICKS(BLE_STARTUP_ADV_MS), pdFALSE, NULL, adv_timeout_cb);
-        }
-        ESP_LOGI(TAG,
-                 "BLE address: %02X:%02X:%02X:%02X:%02X:%02X",
-                 addr_val[5], addr_val[4], addr_val[3],
-                 addr_val[2], addr_val[1], addr_val[0]);
-    }
-
-    if (ORCHESTRA_ROLE == OrchestraRole::Master) {
-        ble_app_advertise();
-        if (!master_adv_refresh_task_handle) {
-            xTaskCreate(ble_master_adv_refresh_task, "BLE AdvRefresh", 3072, NULL, 4, &master_adv_refresh_task_handle);
-        }
-        return;
-    }
-
-    if (!follower_scan_task_handle) {
-        BaseType_t task_ok = xTaskCreate(ble_follower_scan_scheduler_task,
-                                         "BLE Follow Scan",
-                                         4096,
-                                         NULL,
-                                         5,
-                                         &follower_scan_task_handle);
-        if (task_ok != pdPASS) {
-            follower_scan_task_handle = NULL;
-            ESP_LOGE(TAG, "Failed to create follower scan scheduler task");
-            return;
-        }
-    }
-
-    ESP_LOGI(TAG, "Follower mode active; waiting for master sync");
-}
-
-static void ble_app_on_reset(int reason)
-{
-    ESP_LOGE(TAG, "BLE reset; reason=%d", reason);
-}
-
-static void ble_host_task(void *param)
+static void host_task(void *param)
 {
     (void)param;
     nimble_port_run();
-    // Signal ble_deinit() that nimble_port_run() has returned before the task self-deletes
-    if (ble_host_stopped_sem) {
-        xSemaphoreGive(ble_host_stopped_sem);
-    }
+    if (s_host_stopped_sem) xSemaphoreGive(s_host_stopped_sem);
     nimble_port_freertos_deinit();
 }
 
-// Tears down the entire BLE stack. Must be called from a task that is NOT the NimBLE host task.
-void orchestra_ble_deinit(void)
-{
-    if (!ble_initialized) {
-        ESP_LOGW(TAG, "ble_deinit called but BLE not initialised");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Stopping NimBLE host");
-    nimble_port_stop();
-
-    // Wait for the host task to signal that nimble_port_run() has returned
-    if (xSemaphoreTake(ble_host_stopped_sem, pdMS_TO_TICKS(3000)) != pdTRUE) {
-        ESP_LOGE(TAG, "Timeout waiting for BLE host task to stop");
-    }
-
-    nimble_port_deinit();
-
-    esp_err_t ret = esp_nimble_hci_and_controller_deinit();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_nimble_hci_and_controller_deinit failed: %d", ret);
-    }
-
-    ble_initialized = false;
-    ble_advertising = false;
-    ESP_LOGI(TAG, "BLE stack torn down");
-}
-
-// Tears down BLE, waits 38 seconds, then re-initialises it so advertising resumes.
-// Runs as a one-shot FreeRTOS task spawned from the ADV_COMPLETE event handler.
-static void ble_deinit_and_restart_task(void *param)
-{
-    (void)param;
-    ESP_LOGI(TAG, "BLE off period: tearing down stack");
-    orchestra_ble_deinit();
-
-    ESP_LOGI(TAG, "BLE sleeping for %d milliseconds", BLE_CYCLE_OFF_MS);
-    vTaskDelay(pdMS_TO_TICKS(BLE_CYCLE_OFF_MS));
-
-    ESP_LOGI(TAG, "Restarting BLE stack");
-    ble_init();
-
-    vTaskDelete(NULL);
-}
-
+// ── Public init ──────────────────────────────────────────────────────────
 void ble_init(void)
 {
-    ESP_LOGI(TAG, ">>> ble_init() CALLED <<<");
-    
-    if (ble_initialized) {
-        ESP_LOGW(TAG, "ble_init called but BLE already initialised");
-        return;
+    if (s_initialized) return;
+
+    // Pull persisted state before any radio activity.
+    lilum_nvs_load_binding(&s_binding);
+    lilum_nvs_load_element_config(&s_element_cfg);
+    apply_element_config_to_engine(s_element_cfg);
+
+    if (!s_host_stopped_sem) {
+        s_host_stopped_sem = xSemaphoreCreateBinary();
     }
 
-    // Create the semaphore once; it is reused across deinit/reinit cycles
-    if (!ble_host_stopped_sem) {
-        ble_host_stopped_sem = xSemaphoreCreateBinary();
-        if (!ble_host_stopped_sem) {
-            ESP_LOGE(TAG, "Failed to create ble_host_stopped_sem");
-            return;
-        }
-    }
-
-    int rc;
-    ESP_LOGI(TAG, "Initializing BLE");
-    ESP_LOGI(TAG, "Initializing BLE controller");
     esp_nimble_hci_and_controller_init();
-    ESP_LOGI(TAG, "BLE controller initialized");
-
     nimble_port_init();
-    ESP_LOGI(TAG, "NimBLE port initialized");
-    // Standard GAP/GATT services
     ble_svc_gap_init();
-    ESP_LOGI(TAG, "GAP service initialized");
     ble_svc_gatt_init();
-    ESP_LOGI(TAG, "GATT service initialized");
-    // Device name shown in scanner apps
-    rc = ble_svc_gap_device_name_set("Pendant-01");
+    ble_svc_gap_device_name_set("Lilum Mandalum");
+
+    ble_hs_cfg.reset_cb = on_host_reset;
+    ble_hs_cfg.sync_cb  = on_host_sync;
+
+    int rc = ble_gatts_count_cfg(gatt_svcs);
     assert(rc == 0);
-
-    // Host callbacks
-    ble_hs_cfg.reset_cb = ble_app_on_reset;
-    ble_hs_cfg.sync_cb = ble_app_on_sync;
-
-    // Register our GATT database
-    rc = ble_gatts_count_cfg(gatt_svcs);
-    assert(rc == 0);
-
     rc = ble_gatts_add_svcs(gatt_svcs);
     assert(rc == 0);
 
-    // Storage helper for bonds / keys / CCCD state
-    // (Not required on this IDF version; configured internally)
-
-    // Start NimBLE host task
-    nimble_port_freertos_init(ble_host_task);
-
-    ble_initialized = true;
-    ESP_LOGI(TAG, "BLE init complete");
+    nimble_port_freertos_init(host_task);
+    s_initialized = true;
 }
-

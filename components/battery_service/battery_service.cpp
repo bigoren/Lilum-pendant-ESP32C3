@@ -252,13 +252,6 @@ static void ip5306_configure(void)
 
 // ── Power control ──────────────────────────────────────────
 
-static void ip5306_clear_key_latches(void)
-{
-    uint8_t key = 0;
-    if (ip5306_read_reg(IP5306_REG_KEY, &key) == ESP_OK && (key & 0x07)) {
-        ip5306_write_reg(IP5306_REG_KEY, key & 0x07);
-    }
-}
 
 void battery_power_off(void)
 {
@@ -269,35 +262,6 @@ void battery_power_off(void)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-}
-
-bool battery_power_on_confirm(uint32_t timeout_ms)
-{
-    ESP_LOGI(TAG, "Awaiting long-press confirmation (timeout %lu ms)...",
-             (unsigned long)timeout_ms);
-
-    // Discard any latched events from the wake-up press.
-    ip5306_clear_key_latches();
-
-    const TickType_t poll = pdMS_TO_TICKS(50);
-    const int64_t    deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
-
-    while (esp_timer_get_time() < deadline_us) {
-        uint8_t key = 0;
-        if (ip5306_read_reg(IP5306_REG_KEY, &key) == ESP_OK) {
-            if (key & KEY_LONG_PRESS_BIT) {
-                // Clear all latched key bits
-                ip5306_write_reg(IP5306_REG_KEY, key & 0x07);
-                ESP_LOGI(TAG, "Power-on confirmed by long-press");
-                return true;
-            }
-        }
-        vTaskDelay(poll);
-    }
-
-    ESP_LOGW(TAG, "No long-press within window — shutting down");
-    battery_power_off();   // does not return
-    return false;          // unreachable
 }
 
 // ── ADC initialisation ─────────────────────────────────────
