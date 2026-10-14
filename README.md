@@ -82,11 +82,12 @@ Console output uses USB-serial-JTAG.
 
 | Subsystem        | Interface        | Pins (GPIO)                          | Device                       |
 |------------------|------------------|--------------------------------------|------------------------------|
-| LED string       | NEOPIXEL (RMT)   | data **10**, string power **21**     | 28× WS2812 (pixel 0 = status)|
+| LED string       | NEOPIXEL (RMT)   | data **10**, string power **21**     | 28× SK6805-EC14 (pixel 0 = status)|
 | Generic output   | GPIO             | **20**                               | Controllable digital output  |
 | IMU              | I2C0 @ 400 kHz   | SDA **6**, SCL **7**, INT1 **5**     | LSM6DS3TR-C accel/gyro (0x6A)|
 | Microphone       | I2S0             | BCLK **1**, WS **3**, DIN **4**      | SPH0645 MEMS mic, 44.1 kHz   |
 | Battery / power  | I2C0 (shared)    | (shares SDA 6 / SCL 7)               | IP5306 PMIC (0x75)           |
+| Battery cell     | —                | (managed by IP5306)                  | LiPo 3.85 V, 450 mAh (1.733 Wh)|
 | NTC temperature  | ADC1             | **0**                                | 10 kΩ NTC + 60.4 kΩ pull-up  |
 | Button           | GPIO (pull-up)   | **9**                                | Momentary push button        |
 
@@ -277,13 +278,10 @@ on the ADC for temperature. Capabilities:
 - Temperature monitoring with a safe **0–45 °C** charging range.
 - Power-button events: short press, long press, double-click.
 
-**Power-on gate (important):** at boot the LEDs blink while the firmware waits
-**up to 4 s** for you to complete a **3 s long-press** on the power button. If
-you don't, the firmware drops the IP5306 boost rail and the device powers off.
-This prevents accidental power-on in a bag/pocket. Once confirmed, the blink
-clears and the rest of the system comes up.
+There is no power-on confirmation gate: once the IP5306 powers the board the
+firmware boots straight into the animations.
 
-**How to use:** hold the power button ~3 s at power-on to confirm. Enable
+**How to use:** enable
 `LOG_ENABLE_BATTERY` (on by default) to see level/charge/temperature over serial.
 
 ### 8. Serial debug logging
@@ -352,13 +350,13 @@ include/
   orchestra_shared_config.h   per-device identity & BLE timing (edit per device)
   logging_config.h            serial-log toggles
   secrets_template.h          WiFi creds template (copy to secrets.h)             [kivsee env]
-lib/led_engine/               FastLED animations, brightness, white/boot-blink   [Arduino]
+lib/led_engine/               FastLED animations, brightness, white mode         [Arduino]
 lib/kivsee_app/               WiFi/MQTT/renderer pipeline (vendored)             [kivsee env]
 lib/app_mode/                 NVS-backed runtime mode + switch helpers           [kivsee env]
 components/
   IMU_service/                LSM6DS3TR-C accel + double-dip gesture             [ESP-IDF]
   mic_service/                SPH0645 I2S mic: volume / beat / BPM               [ESP-IDF]
-  battery_service/            IP5306 PMIC + NTC temp + power-on gate             [ESP-IDF]
+  battery_service/            IP5306 PMIC + NTC temp + power control             [ESP-IDF]
   button_service/             button UX (mode/pattern/brightness/white/triple)   [ESP-IDF]
   orchestra_ble/              NimBLE master/follower animation sync              [custom env]
 platformio.ini                build envs: esp32c3_custom (BLE), esp32c3_kivsee (WiFi+standalone), esp32c3_kivsee_ota (WiFi flash)
@@ -372,11 +370,10 @@ partitions_kivsee.csv         dual OTA app slots + SPIFFS for the kivsee binary
 `app_main()` brings the system up in a deliberate order:
 
 1. NVS init → 2. IMU init (brings up I2C) → 3. Battery/IP5306 config →
-4. LED task starts with the **boot-blink overlay** on →
-5. **wait for power-on long-press confirmation** (or power off) →
-6. Radio: BLE (`esp32c3_custom` env) **or** read `app_mode` from NVS and start
+4. LED task starts →
+5. Radio: BLE (`esp32c3_custom` env) **or** read `app_mode` from NVS and start
    the kivsee task if persisted (`esp32c3_kivsee` env; default standalone) →
-7. Mic → 8. Button → 9. battery monitor task → 10. print task.
+6. Mic → 7. Button → 8. battery monitor task → 9. print task.
 
 ---
 

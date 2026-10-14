@@ -25,13 +25,6 @@ void led_engine_set_white_mode(bool enable);
 /// Returns true when white mode is active.
 bool led_engine_is_white_mode(void);
 
-/// Enable a brightness-based blink overlay used during the power-on confirm
-/// window. While enabled, the existing animations still run; only the global
-/// FastLED brightness is gated on/off in a square wave so the visible effect
-/// is the LEDs blinking. Disable when the system has confirmed power-on so
-/// animations are shown at their normal brightness.
-void led_engine_set_boot_blink(bool enable);
-
 #ifdef LILUM_KIVSEE
 // Kivsee env exposes the FastLED buffer so the networked Renderer can fill
 // it directly; LED_SRC_KIVSEE skips pattern selection.
@@ -48,11 +41,12 @@ struct CRGB *led_engine_anim_buffer(void);
 void         led_engine_anim_commit(void);
 int          led_engine_num_anim_leds(void);
 
-// 1 s on / 1 s off brightness gating; signals "trying to connect" visually.
+// "Trying to connect" indicator: status pixel blinks blue (1 s on / 1 s off) and,
+// while no animation is playing, a single dim blue dot orbits the outer ring.
 void led_engine_set_connecting_blink(bool enable);
 
-// Kivsee idle indicator: slow green status-pixel blink (1 s on / 1 s off) when
-// connected but no animation/trigger is playing. Yields to the charge states.
+// Kivsee idle flag: set while no animation/trigger is playing. Nothing is lit
+// for it; it only allows the connecting dot above to use the main LEDs.
 void led_engine_set_idle_blink(bool enable);
 #endif
 

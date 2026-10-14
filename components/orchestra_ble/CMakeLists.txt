@@ -13,11 +13,14 @@ else()
         SRCS
             "simple_BLE.cpp"
             "orchestra_payload.cpp"
+            "lilum_config.cpp"
+            "lilum_nvs.cpp"
         INCLUDE_DIRS
             "include"
             "../../include"
             "../../lib/led_engine"
         REQUIRES
             bt
+            nvs_flash
     )
 endif()

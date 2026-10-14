@@ -1,114 +1,157 @@
 #include "orchestra_payload.h"
 
-// Serializes the fixed-width manufacturer payload into a compact 17-byte buffer.
-size_t orchestra_encode_adv_payload(uint8_t *buffer, size_t buffer_len, const OrchestraAdvPayload &payload)
+#include <string.h>
+
+namespace {
+
+inline void write_u16_le(uint8_t *dst, uint16_t v)
 {
-    if (!buffer || buffer_len < ORCHESTRA_ADV_PAYLOAD_LEN) {
+    dst[0] = static_cast<uint8_t>(v & 0xFF);
+    dst[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+}
+
+inline uint16_t read_u16_le(const uint8_t *src)
+{
+    return static_cast<uint16_t>(src[0]) |
+           (static_cast<uint16_t>(src[1]) << 8);
+}
+
+inline void write_u32_le(uint8_t *dst, uint32_t v)
+{
+    dst[0] = static_cast<uint8_t>(v & 0xFF);
+    dst[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    dst[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    dst[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+}
+
+inline uint32_t read_u32_le(const uint8_t *src)
+{
+    return static_cast<uint32_t>(src[0]) |
+           (static_cast<uint32_t>(src[1]) << 8) |
+           (static_cast<uint32_t>(src[2]) << 16) |
+           (static_cast<uint32_t>(src[3]) << 24);
+}
+
+inline size_t write_header(uint8_t *buf, uint8_t kind)
+{
+    write_u16_le(buf, LILUM_ADV_COMPANY_ID);
+    buf[2] = kind;
+    return 3;
+}
+
+inline bool check_header(const uint8_t *buf, size_t buf_len, uint8_t expected_kind)
+{
+    if (buf_len < 3) return false;
+    if (read_u16_le(buf) != LILUM_ADV_COMPANY_ID) return false;
+    return buf[2] == expected_kind;
+}
+
+}  // namespace
+
+size_t lilum_encode_config_adv(uint8_t *buf,
+                               size_t buf_len,
+                               const LilumConfigAdvPayload &payload)
+{
+    if (!buf || buf_len < LILUM_ADV_CONFIG_MFG_BYTES) {
         return 0;
     }
 
-    // Fields are stored little-endian so encoder and decoder stay symmetric.
-    buffer[0] = static_cast<uint8_t>(ORCHESTRA_ADV_COMPANY_ID & 0xFF);
-    buffer[1] = static_cast<uint8_t>((ORCHESTRA_ADV_COMPANY_ID >> 8) & 0xFF);
-    buffer[2] = ORCHESTRA_ADV_DATA_VERSION;
-    buffer[3] = static_cast<uint8_t>(payload.group_id & 0xFF);
-    buffer[4] = static_cast<uint8_t>((payload.group_id >> 8) & 0xFF);
-    buffer[5] = static_cast<uint8_t>(payload.device_id & 0xFF);
-    buffer[6] = static_cast<uint8_t>((payload.device_id >> 8) & 0xFF);
-    buffer[7] = static_cast<uint8_t>(payload.role);
-    buffer[8] = static_cast<uint8_t>(static_cast<uint16_t>(payload.position) & 0xFF);
-    buffer[9] = static_cast<uint8_t>((static_cast<uint16_t>(payload.position) >> 8) & 0xFF);
-    buffer[10] = static_cast<uint8_t>(payload.master_id & 0xFF);
-    buffer[11] = static_cast<uint8_t>((payload.master_id >> 8) & 0xFF);
-    buffer[12] = static_cast<uint8_t>(payload.sync_timestamp_ms & 0xFF);
-    buffer[13] = static_cast<uint8_t>((payload.sync_timestamp_ms >> 8) & 0xFF);
-    buffer[14] = static_cast<uint8_t>((payload.sync_timestamp_ms >> 16) & 0xFF);
-    buffer[15] = static_cast<uint8_t>((payload.sync_timestamp_ms >> 24) & 0xFF);
-    buffer[16] = payload.animation_mode;
+    size_t off = write_header(buf, LILUM_ADV_KIND_CONFIG);
 
-    return ORCHESTRA_ADV_PAYLOAD_LEN;
+    write_u16_le(buf + off, payload.element_type_id_hash);
+    off += 2;
+
+    memcpy(buf + off, payload.pair_id, 16);
+    off += 16;
+
+    memcpy(buf + off, payload.group_id, 16);
+    off += 16;
+
+    buf[off++] = payload.firmware_major;
+    buf[off++] = payload.firmware_minor;
+    buf[off++] = payload.firmware_patch;
+    buf[off++] = payload.config_window_remaining_sec;
+
+    return off;
 }
 
-// Decodes and validates a manufacturer payload before exposing typed fields.
-bool orchestra_decode_adv_payload(const uint8_t *buffer, size_t buffer_len, OrchestraAdvPayload *out_payload)
+bool lilum_decode_config_adv(const uint8_t *buf,
+                             size_t buf_len,
+                             LilumConfigAdvPayload *out)
 {
-    if (!buffer || !out_payload || buffer_len < ORCHESTRA_ADV_PAYLOAD_LEN) {
-        return false;
-    }
+    if (!buf || !out) return false;
+    if (!check_header(buf, buf_len, LILUM_ADV_KIND_CONFIG)) return false;
+    if (buf_len < LILUM_ADV_CONFIG_MFG_BYTES) return false;
 
-    // Reject unrelated advertisements early using the company identifier and version.
-    const uint16_t company_id = static_cast<uint16_t>(buffer[0]) |
-                                (static_cast<uint16_t>(buffer[1]) << 8);
-    if (company_id != ORCHESTRA_ADV_COMPANY_ID) {
-        return false;
-    }
-
-    if (buffer[2] != ORCHESTRA_ADV_DATA_VERSION) {
-        return false;
-    }
-
-    out_payload->group_id = static_cast<uint16_t>(buffer[3]) |
-                            (static_cast<uint16_t>(buffer[4]) << 8);
-    out_payload->device_id = static_cast<uint16_t>(buffer[5]) |
-                             (static_cast<uint16_t>(buffer[6]) << 8);
-    out_payload->role = static_cast<OrchestraRole>(buffer[7]);
-    out_payload->position = static_cast<int16_t>(
-        static_cast<uint16_t>(buffer[8]) |
-        (static_cast<uint16_t>(buffer[9]) << 8));
-    out_payload->master_id = static_cast<uint16_t>(buffer[10]) |
-                             (static_cast<uint16_t>(buffer[11]) << 8);
-    out_payload->sync_timestamp_ms = static_cast<uint32_t>(buffer[12]) |
-                                     (static_cast<uint32_t>(buffer[13]) << 8) |
-                                     (static_cast<uint32_t>(buffer[14]) << 16) |
-                                     (static_cast<uint32_t>(buffer[15]) << 24);
-    out_payload->animation_mode = buffer[16];
-
+    size_t off = 3;
+    out->element_type_id_hash = read_u16_le(buf + off);
+    off += 2;
+    memcpy(out->pair_id, buf + off, 16);
+    off += 16;
+    memcpy(out->group_id, buf + off, 16);
+    off += 16;
+    out->firmware_major = buf[off++];
+    out->firmware_minor = buf[off++];
+    out->firmware_patch = buf[off++];
+    out->config_window_remaining_sec = buf[off++];
     return true;
 }
 
-// Startup is treated as continuously on-air; after that the master alternates between
-// off periods and short advertising windows (off first, then on).
-bool orchestra_is_master_on_air(uint32_t master_time_ms)
+size_t lilum_encode_runtime_adv(uint8_t *buf,
+                                size_t buf_len,
+                                const LilumRuntimeAdvPayload &payload)
 {
-    if (master_time_ms < ORCHESTRA_STARTUP_WINDOW_MS) {
-        return true;
+    if (!buf || buf_len < LILUM_ADV_RUNTIME_MFG_BYTES) {
+        return 0;
     }
 
-    const uint32_t periodic_ms = ORCHESTRA_CYCLE_ADV_MS + ORCHESTRA_CYCLE_OFF_MS;
-    const uint32_t cycle_phase_ms = (master_time_ms - ORCHESTRA_STARTUP_WINDOW_MS) % periodic_ms;
-    return cycle_phase_ms >= ORCHESTRA_CYCLE_OFF_MS;
+    size_t off = write_header(buf, LILUM_ADV_KIND_RUNTIME);
+
+    write_u16_le(buf + off, payload.element_type_id_hash);
+    off += 2;
+
+    buf[off++] = payload.session_kind;
+
+    memcpy(buf + off, payload.session_id, 16);
+    off += 16;
+
+    write_u32_le(buf + off, payload.sync_timestamp_ms);
+    off += 4;
+
+    buf[off++] = payload.animation_index;
+    buf[off++] = payload.brightness;
+
+    return off;
 }
 
-// Returns zero when already inside an advertising window, otherwise the delay until the
-// next on-air slot begins in the repeating advertise/off cycle.
-uint32_t orchestra_ms_until_next_master_on_air(uint32_t master_time_ms)
+bool lilum_decode_runtime_adv(const uint8_t *buf,
+                              size_t buf_len,
+                              LilumRuntimeAdvPayload *out)
 {
-    if (orchestra_is_master_on_air(master_time_ms)) {
-        return 0;
-    }
+    if (!buf || !out) return false;
+    if (!check_header(buf, buf_len, LILUM_ADV_KIND_RUNTIME)) return false;
+    if (buf_len < LILUM_ADV_RUNTIME_MFG_BYTES) return false;
 
-    if (master_time_ms < ORCHESTRA_STARTUP_WINDOW_MS) {
-        return 0;
-    }
-
-    const uint32_t periodic_ms = ORCHESTRA_CYCLE_ADV_MS + ORCHESTRA_CYCLE_OFF_MS;
-    const uint32_t cycle_phase_ms = (master_time_ms - ORCHESTRA_STARTUP_WINDOW_MS) % periodic_ms;
-    return ORCHESTRA_CYCLE_OFF_MS - cycle_phase_ms;
+    size_t off = 3;
+    out->element_type_id_hash = read_u16_le(buf + off);
+    off += 2;
+    out->session_kind = buf[off++];
+    memcpy(out->session_id, buf + off, 16);
+    off += 16;
+    out->sync_timestamp_ms = read_u32_le(buf + off);
+    off += 4;
+    out->animation_index = buf[off++];
+    out->brightness = buf[off++];
+    return true;
 }
 
-// Reports how much of the current advertising slot is left so followers can size their
-// scan window to cover the master's remaining transmission time.
-uint32_t orchestra_master_on_air_remaining_ms(uint32_t master_time_ms)
+uint8_t lilum_adv_kind(const uint8_t *buf, size_t buf_len)
 {
-    if (!orchestra_is_master_on_air(master_time_ms)) {
-        return 0;
+    if (buf_len < 3) return 0;
+    if (read_u16_le(buf) != LILUM_ADV_COMPANY_ID) return 0;
+    const uint8_t k = buf[2];
+    if (k == LILUM_ADV_KIND_CONFIG || k == LILUM_ADV_KIND_RUNTIME) {
+        return k;
     }
-
-    if (master_time_ms < ORCHESTRA_STARTUP_WINDOW_MS) {
-        return ORCHESTRA_STARTUP_WINDOW_MS - master_time_ms;
-    }
-
-    const uint32_t periodic_ms = ORCHESTRA_CYCLE_ADV_MS + ORCHESTRA_CYCLE_OFF_MS;
-    const uint32_t cycle_phase_ms = (master_time_ms - ORCHESTRA_STARTUP_WINDOW_MS) % periodic_ms;
-    return periodic_ms - cycle_phase_ms;
+    return 0;
 }

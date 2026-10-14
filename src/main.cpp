@@ -87,25 +87,28 @@ void printTask(void *pvParameter) {
         int pos = 0;
 
         if (LOG_ENABLE_MAIN) {
-            extern uint8_t g_animation_mode;
-            if (ORCHESTRA_ROLE == OrchestraRole::Master) {
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "Master | Anim: %u", g_animation_mode);
-            } else {
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "Follower | Anim: %u", g_animation_mode);
-            }
+#ifndef LILUM_KIVSEE
+            const char *role_str = ble_in_config_window() ? "CfgWin"
+                                   : ble_runtime_is_master()   ? "Master"
+                                   : ble_runtime_is_follower() ? "Follower"
+                                                               : "Idle";
+#else
+            const char *role_str = app_mode_current() == APP_MODE_KIVSEE ? "Kivsee"
+                                                                         : "Standalone";
+#endif
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s | Anim: %u",
+                            role_str, g_animation_mode);
         }
 
 #ifndef LILUM_KIVSEE
         if (LOG_ENABLE_BLE) {
-            if (ORCHESTRA_ROLE == OrchestraRole::Master) {
-                pos += snprintf(buf + pos, sizeof(buf) - pos, " | Adv: %s",
-                                ble_is_currently_advertising() ? "Y" : "N");
-            } else {
-                pos += snprintf(buf + pos, sizeof(buf) - pos, " | Sync: %s | Scan: %s | NextScan: %lu ms",
-                                ble_is_follower_synced() ? "Y" : "N",
-                                ble_is_currently_scanning() ? "Y" : "N",
-                                (unsigned long)ble_ms_until_next_scan());
-            }
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            " | Adv:%s Scan:%s Conn:%s Sync:%s CfgWin:%us",
+                            ble_is_currently_advertising() ? "Y" : "N",
+                            ble_is_currently_scanning() ? "Y" : "N",
+                            ble_is_connected() ? "Y" : "N",
+                            ble_is_follower_synced() ? "Y" : "N",
+                            (unsigned)ble_config_window_remaining_sec());
         }
 #endif
 
@@ -170,23 +173,13 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(rc);
     ESP_LOGI(TAG, "NVS initialized");
 
-    // ── Power-on gate ──────────────────────────────────────
-    // 1) Bring up I2C (via IMU) so we can talk to the IP5306.
-    // 2) Configure IP5306 (long-press = 3 s, etc.).
-    // 3) Start the LED task with the boot-blink overlay enabled so the
-    //    animation runs but visibly blinks while we wait for confirmation.
-    // 4) Wait up to 4 s for the user to complete a long-press.
-    //    If absent → battery_power_on_confirm() drops BOOST_EN and
-    //    the chip dies. Otherwise the boot-blink overlay is cleared and
-    //    the rest of the system comes up.
     ESP_LOGI(TAG, "Starting IMU Service (brings up I2C)");
     imu_service_init();
 
     ESP_LOGI(TAG, "Initialising Battery Service (IP5306)");
     battery_service_init();
 
-    ESP_LOGI(TAG, "Starting LED Task (boot-blink overlay ON)");
-    led_engine_set_boot_blink(true);
+    ESP_LOGI(TAG, "Starting LED Task");
     xTaskCreate(ledTask, // Task function
          "LED Task", // Name of the task
         4096, // Stack size in bytes
@@ -194,27 +187,6 @@ extern "C" void app_main(void) {
         1, // Task priority
         NULL // Task handle
     );
-
-#ifdef LILUM_GATE_BYPASS
-    // Opt-in dev bypass (default OFF). Skips the power-on long-press gate so
-    // the device boots straight through — useful when iterating on USB, where
-    // battery_power_off() cannot cut the rail and the gate otherwise hangs.
-    // Enable per-checkout by uncommenting `-D LILUM_GATE_BYPASS=1` in the
-    // kivsee env's build_flags (platformio.ini). Do NOT enable for shipped /
-    // battery-powered builds — it disables the user-confirmation safety check.
-    ESP_LOGW(TAG, "LILUM_GATE_BYPASS: skipping power-on long-press confirmation");
-#else
-    if (esp_reset_reason() == ESP_RST_SW) {
-        // Software-initiated reset (e.g. double-click reboot) — the IP5306 rail
-        // stayed up so there was no accidental power-on; skip the gate.
-        ESP_LOGI(TAG, "Soft reset detected — skipping power-on gate");
-    } else {
-        ESP_LOGI(TAG, "Waiting for long-press to confirm power-on...");
-        battery_power_on_confirm(4000);   // returns only on success
-    }
-#endif
-    led_engine_set_boot_blink(false);
-    ESP_LOGI(TAG, "Power-on confirmed — bringing up the rest of the system");
 
 #ifndef LILUM_KIVSEE
     ESP_LOGI(TAG, "Calling ble_init...");

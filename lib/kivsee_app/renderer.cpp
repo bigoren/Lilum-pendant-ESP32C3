@@ -22,8 +22,8 @@ namespace esp32animations
         readEpochTimeUpdateFromQueue();
         reportMetricsIfNeeded();
 
-        // Idle indicator: no animation loaded means no trigger is playing, so
-        // ask the LED engine to slow-blink the status pixel green ("ready").
+        // Idle flag: no animation loaded means no trigger is playing, so the LED
+        // engine may use the main LEDs for its connecting indicator.
         led_engine_set_idle_blink(runtime_animation.animation == nullptr);
 
         clear();

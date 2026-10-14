@@ -14,3 +14,14 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # Enable BLE with NimBLE stack.
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
+
+# Enable BLE 5 extended advertising. Required to fit the 41-byte Lilum
+# configuration-window manufacturer-data payload, which exceeds the legacy
+# 31-byte advertising limit.
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=1
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_DATA_LEN=251
+
+# Larger ATT MTU so a single ElementConfig blob write does not need to be
+# fragmented across multiple GATT writes (see firmware-ble-protocol.md §6.1).
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256

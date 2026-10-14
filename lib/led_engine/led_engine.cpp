@@ -60,19 +60,25 @@ static const uint8_t ZERO_CLAMP = 40;
 static bool g_white_mode = false;
 
 // ---------------------------------------------------------------------------
-// Boot-blink overlay (used during the power-on confirm window)
+// Auto-mode pattern cycling
 // ---------------------------------------------------------------------------
-static bool         g_boot_blink_active   = false;
-#define BOOT_BLINK_PERIOD_MS  400  // full on/off cycle = 400 ms (≈2.5 Hz)
+// While in auto mode, advance to the next auto pattern every
+// AUTO_CYCLE_INTERVAL_MS. Paused in white/manual mode and while the kivsee
+// renderer owns the LEDs.
+#define AUTO_CYCLE_INTERVAL_MS 10000
+static unsigned long s_last_auto_cycle_ms = 0;
 
 #ifdef LILUM_KIVSEE
 static bool g_connecting_blink_active = false;
 #define CONNECTING_BLINK_PERIOD_MS  2000
+// Main-LED connecting indicator: one blue dot stepping around the outer ring.
+#define CONNECTING_DOT_RING_LEDS    9     // anim[0..8] = outer ring
+#define CONNECTING_DOT_STEP_MS      150   // full lap ≈ 1.35 s
+#define CONNECTING_DOT_LEVEL        128   // blue only, further scaled by workingBrightness
 
-// Kivsee idle: connected to the network but no animation/trigger is playing.
-// Slow green status-pixel blink (1 s on / 1 s off) as a "ready & waiting" cue.
+// Kivsee idle: no animation/trigger is playing. Shows nothing by itself (LEDs
+// stay dark); only gates the connecting dot so it never draws over an animation.
 static bool g_idle_blink_active = false;
-#define IDLE_BLINK_PERIOD_MS  2000
 
 static led_src_t g_led_source = LED_SRC_FASTLED;
 #endif
@@ -619,6 +625,7 @@ void led_engine_setup() {
 
     lastHueModTime = millis();
     lastHueSinelonTime = millis();
+    s_last_auto_cycle_ms = millis();
 }
 
 void led_engine_loop() {
@@ -632,6 +639,20 @@ void led_engine_loop() {
     if (now - lastHueSinelonTime >= 10) {
         gHueSinelon++;
         lastHueSinelonTime = now;
+    }
+
+    // Auto-mode pattern cycling.
+    bool auto_cycling = !g_white_mode && !g_manual_mode_active;
+#ifdef LILUM_KIVSEE
+    auto_cycling = auto_cycling && g_led_source != LED_SRC_KIVSEE;
+#endif
+    if (!auto_cycling || now - s_last_auto_cycle_ms >= AUTO_CYCLE_INTERVAL_MS) {
+        // When paused, keep the timer fresh so the full interval applies once
+        // auto mode resumes.
+        if (auto_cycling) {
+            g_animation_mode = (g_animation_mode + 1) % NUM_AUTO_PATTERNS;
+        }
+        s_last_auto_cycle_ms = now;
     }
 
     // Update controllable output
@@ -651,6 +672,14 @@ void led_engine_loop() {
                 fill_solid(anim, NUM_ANIM_LEDS, CRGB::White);
                 FastLED.setBrightness(LED_BRIGHTNESS_WHITE);
             } else {
+                // Connecting and nothing playing: one dim blue dot orbiting the
+                // outer ring, so the state is visible when the status pixel is
+                // hidden. A single lit pixel keeps the current draw minimal.
+                if (g_connecting_blink_active && g_idle_blink_active) {
+                    fill_solid(anim, NUM_ANIM_LEDS, CRGB::Black);
+                    anim[(now / CONNECTING_DOT_STEP_MS) % CONNECTING_DOT_RING_LEDS] =
+                        CRGB(0, 0, CONNECTING_DOT_LEVEL);
+                }
                 FastLED.setBrightness(workingBrightness);
             }
         } else
@@ -727,27 +756,9 @@ void led_engine_loop() {
         }
     }
 
-    // Boot-blink overlay: gate the global brightness on/off so the running
-    // animation appears to blink. Applied last so it overrides whatever the
-    // pattern functions set.
-    if (g_boot_blink_active) {
-        bool on = ((now / (BOOT_BLINK_PERIOD_MS / 2)) & 1) == 0;
-        if (!on) {
-            FastLED.setBrightness(0);
-        }
-    }
 #ifdef LILUM_KIVSEE
-    // Kivsee idle: connected but nothing playing — slow green blink (1 s on / 1 s
-    // off). Only while discharging so it never overrides the charge indications
-    // (charging red / full solid green), which are written just above.
-    if (g_idle_blink_active &&
-        battery_get_charge_status() == BAT_CHG_NOT_CHARGING) {
-        bool on = ((now / (IDLE_BLINK_PERIOD_MS / 2)) & 1) == 0;
-        leds[STATUS_LED_INDEX] = on ? CRGB::Green : CRGB::Black;
-    }
-
     // WiFi connecting: blink status pixel blue — distinct from the red charge
-    // states. Applied last so it wins over the idle blink during bring-up.
+    // states.
     if (g_connecting_blink_active) {
         bool on = ((now / (CONNECTING_BLINK_PERIOD_MS / 2)) & 1) == 0;
         leds[STATUS_LED_INDEX] = on ? CRGB::Blue : CRGB::Black;
@@ -771,10 +782,6 @@ void led_engine_set_white_mode(bool enable) {
 
 bool led_engine_is_white_mode(void) {
     return g_white_mode;
-}
-
-void led_engine_set_boot_blink(bool enable) {
-    g_boot_blink_active = enable;
 }
 
 #ifdef LILUM_KIVSEE
