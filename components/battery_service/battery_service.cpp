@@ -89,6 +89,7 @@ static const char *TAG = "BAT";
 
 // ── Periodic task ──────────────────────────────────────────
 #define BAT_POLL_MS         1000     // 1-second poll interval
+#define BAT_LOG_HEARTBEAT_MS 60000   // status log at least once a minute
 #define BAT_TASK_STACK      3072
 
 // ── Shared state ───────────────────────────────────────────
@@ -394,13 +395,23 @@ static void battery_task(void *arg)
             s_charge_status = BAT_CHG_NOT_CHARGING;
         }
 
-        // ── Status log ──
-        ESP_LOGI(TAG, "Batt: %d%% | %s%s | Temp: %.1f°C %s",
-                 (int)s_bat_level,
-                 s_charge_full ? "FULL" : (s_charging ? "CHARGING" : "DISCHARGING"),
-                 s_chg_inhibited ? " (CHG OFF-TEMP)" : "",
-                 s_temperature,
-                 s_temp_ok ? "(OK)" : "(OUT OF RANGE)");
+        // ── Status log: on any state change, otherwise every BAT_LOG_HEARTBEAT_MS ──
+        static int8_t                  s_log_level  = -2;  // forces the first print
+        static battery_charge_status_t s_log_status = BAT_CHG_NOT_CHARGING;
+        static TickType_t              s_log_tick   = 0;
+        const TickType_t now_tick = xTaskGetTickCount();
+        if (s_bat_level != s_log_level || s_charge_status != s_log_status ||
+            now_tick - s_log_tick >= pdMS_TO_TICKS(BAT_LOG_HEARTBEAT_MS)) {
+            s_log_level  = s_bat_level;
+            s_log_status = s_charge_status;
+            s_log_tick   = now_tick;
+            ESP_LOGI(TAG, "Batt: %d%% | %s%s | Temp: %.1f°C %s",
+                     (int)s_bat_level,
+                     s_charge_full ? "FULL" : (s_charging ? "CHARGING" : "DISCHARGING"),
+                     s_chg_inhibited ? " (CHG OFF-TEMP)" : "",
+                     s_temperature,
+                     s_temp_ok ? "(OK)" : "(OUT OF RANGE)");
+        }
 
         vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(BAT_POLL_MS));
     }

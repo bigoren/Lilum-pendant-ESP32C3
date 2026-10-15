@@ -84,6 +84,7 @@ void printTask(void *pvParameter) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     while (1) {
         char buf[256];
+        buf[0] = '\0';
         int pos = 0;
 
         if (LOG_ENABLE_MAIN) {
@@ -148,7 +149,9 @@ void printTask(void *pvParameter) {
                             battery_temp_in_range() ? "" : " !TEMP");
         }
 
-        ESP_LOGI(TAG, "%s", buf);
+        if (pos > 0) {
+            ESP_LOGI(TAG, "%s", buf);
+        }
         xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(LOG_INTERVAL_MS));
     }
 }
