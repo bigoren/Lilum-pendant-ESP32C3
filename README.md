@@ -193,12 +193,28 @@ LILUM_OTA_HOST=lilum.local pio run -e esp32c3_kivsee_ota -t upload
 ### 1. LED animations
 
 Drives 27 animation pixels (pixel 0 is reserved as a status LED) via FastLED.
-There are two modes:
+There are 23 patterns in one list, shared by both modes:
 
-- **Auto mode** (default at boot): cycles through 5 patterns —
-  `rainbow`, `confetti`, `spinningVortex`, `portal`, `wings`.
-- **Manual mode**: holds a single pattern. 13 variants are available, including
-  per-color versions (e.g. `portalR/G/B`, `wingsR/G/B`, `spinningVortexR/G/B`).
+- `rainbowMap1`, `confetti`, `confettiFlowerB/R`
+- `spinningVortex` + `B/G/R`, `portal` + `B/G/R`, `wings` + `G/R/B`
+  (letter suffix = fixed color family)
+- `beacon` — the three segments pulse with offset triangle waves
+- `sinelonUneven` — a column sweeps fast one way, slowly back with a long
+  trail, then fades out fully before the next pass
+- `curtainCenter` / `curtainEdges` — the lit area quickly opens and closes
+  (from the middle, or in from the edges), then fades to black
+- `heartbeat` — a small pulse then a big one from the middle, ~42 per minute
+- `sweep` — one quick pass every 3 s, alternating direction, slow fade
+- `flower` — four colors in a petal layout, rotating with cross-fades
+
+Modes:
+
+- **Auto mode** (default at boot): advances to the next pattern every 30 s
+  (`AUTO_CYCLE_INTERVAL_MS`). Paused in white/manual mode and while kivsee
+  mode owns the LEDs.
+- **Manual mode**: holds a single pattern; each short press steps to the next.
+
+Every pattern change is logged on serial with its name (tag `ANIM`).
 
 **How to use:** switch to manual mode and step through patterns with the button
 (see [Button controls](#3-button-controls)). In an orchestra, the master's
@@ -292,14 +308,19 @@ monitor. Everything is controlled from
 
 | Setting               | Purpose                                  | Default |
 |-----------------------|------------------------------------------|---------|
-| `LOG_INTERVAL_MS`     | How often the line prints                | 1000 ms |
-| `LOG_ENABLE_MAIN`     | Role & current animation                 | off     |
-| `LOG_ENABLE_BLE`      | Advertise / scan / sync status           | off     |
+| `LOG_INTERVAL_MS`     | How often the line prints                | 2000 ms |
+| `LOG_ENABLE_MAIN`     | Role (kivsee: mode) & current animation  | off     |
+| `LOG_ENABLE_BLE`      | Advertise / scan / sync status (BLE env) | **on**  |
 | `LOG_ENABLE_MIC`      | Volume / BPM / beat                      | off     |
 | `LOG_ENABLE_IMU`      | Per-axis acceleration (mg)               | off     |
 | `LOG_ENABLE_GESTURE`  | Gesture state machine (for tuning)       | off     |
-| `LOG_ENABLE_BATTERY`  | Battery %, charge state, temperature     | **on**  |
+| `LOG_ENABLE_BATTERY`  | Battery %, charge state, temperature     | off     |
 | `LOG_ENABLE_BLE_STACK`| Verbose NimBLE / BLE_INIT logs           | off     |
+
+If no section is enabled (e.g. the kivsee build with the defaults), the status
+line is not printed at all. Independently of these flags, the battery service
+logs its own status line on any level/charge-state change and at least once a
+minute.
 
 Toggle the sections you care about and rebuild.
 

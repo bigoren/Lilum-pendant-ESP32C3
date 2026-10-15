@@ -65,7 +65,7 @@ static bool g_white_mode = false;
 // While in auto mode, advance to the next auto pattern every
 // AUTO_CYCLE_INTERVAL_MS. Paused in white/manual mode and while the kivsee
 // renderer owns the LEDs.
-#define AUTO_CYCLE_INTERVAL_MS 10000
+#define AUTO_CYCLE_INTERVAL_MS 30000
 static unsigned long s_last_auto_cycle_ms = 0;
 
 #ifdef LILUM_KIVSEE
@@ -90,72 +90,81 @@ static led_src_t g_led_source = LED_SRC_FASTLED;
 #define NUM_LEDS_MAP3 4  // indices 0..3
 static CRGB ledsMap1[NUM_LEDS_MAP1];
 static CRGB ledsMap3[NUM_LEDS_MAP3];
-static CRGB ledsMap4[NUM_LEDS_MAP3];
-static CRGB ledsMap5[3];
 
 static uint8_t map1Mapping[27] = {0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2};
 static uint8_t map2brightness[27] = {0,1,0,0,1,0,0,1,0,0,1,1,0,1,1,0,1,1,1,1,1,1,1,1,1,1,1};
 static uint8_t map3Mapping[27] = {0,1,0,0,1,0,0,1,0,0,2,1,0,2,1,0,2,1,3,2,1,3,2,1,3,2,1};
-static uint8_t map4Mapping[27] = {0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0};
-static uint8_t map5Mapping[27] = {0,1,2,0,1,2,0,1,2,0,1,2,0,1,2,0,1,2,1,2,0,1,2,0,1,2,0};
 
 // ---------------------------------------------------------------------------
-// FST (flower smooth transition) state
-// ---------------------------------------------------------------------------
-static CRGB FSTcurrentStartLeds[NUM_ANIM_LEDS];
-static CRGB FSTcurrentEndLeds[NUM_ANIM_LEDS];
-static uint8_t counterFST = 0;
-static uint32_t timerFST = 0;
-static bool flagFST = false;
-
-// ---------------------------------------------------------------------------
-// Global hue counters (incremented from led_engine_loop)
+// Global hue counter (incremented from led_engine_loop)
 // ---------------------------------------------------------------------------
 static uint8_t gHueModifier = 0;
-static uint8_t gHueSinelon  = 0;
 static unsigned long lastHueModTime = 0;
-static unsigned long lastHueSinelonTime = 0;
 
 // ---------------------------------------------------------------------------
-// Forward declarations – automatic patterns
+// Forward declarations – patterns
 // ---------------------------------------------------------------------------
 static void rainbowMap1();
 static void confetti();
-static void spinningVortex();
-static void portal();
-static void wings();
-
-// ---------------------------------------------------------------------------
-// Forward declarations – manual (single-color) pattern variants
-// ---------------------------------------------------------------------------
 static void confettiFlowerB();
 static void confettiFlowerR();
-static void spinningVortexR();
+static void spinningVortex();
 static void spinningVortexB();
 static void spinningVortexG();
-static void portalR();
-static void portalG();
+static void spinningVortexR();
+static void portal();
 static void portalB();
-static void wingsR();
+static void portalG();
+static void portalR();
+static void wings();
 static void wingsG();
+static void wingsR();
 static void wingsB();
+static void beacon();
+static void sinelonUneven();
+static void curtainCenter();
+static void curtainEdges();
+static void heartbeat();
+static void sweep();
+static void flower();
 
 // ---------------------------------------------------------------------------
-// Pattern lists
+// Pattern list
 // ---------------------------------------------------------------------------
-typedef void (*PatternFunc)();
-
-static PatternFunc gPatternsAuto[] = { rainbowMap1, confetti, spinningVortex, portal, wings };
-static constexpr uint8_t NUM_AUTO_PATTERNS = sizeof(gPatternsAuto) / sizeof(gPatternsAuto[0]);
-
-static PatternFunc gPatternsManual[] = {
-    rainbowMap1, confetti,
-    confettiFlowerB, confettiFlowerR,
-    spinningVortexB, spinningVortexG, spinningVortexR,
-    portalB, portalG, portalR,
-    wingsG, wingsR, wingsB
+// One list serves both modes: auto mode advances through it every
+// AUTO_CYCLE_INTERVAL_MS, and in manual mode each short button press steps to
+// the next entry. The name is logged on every change.
+struct Pattern {
+    void (*fn)();
+    const char *name;
 };
-static constexpr uint8_t NUM_MANUAL_PATTERNS = sizeof(gPatternsManual) / sizeof(gPatternsManual[0]);
+
+static const Pattern gPatterns[] = {
+    { rainbowMap1,     "rainbowMap1" },
+    { confetti,        "confetti" },
+    { confettiFlowerB, "confettiFlowerB" },
+    { confettiFlowerR, "confettiFlowerR" },
+    { spinningVortex,  "spinningVortex" },
+    { spinningVortexB, "spinningVortexB" },
+    { spinningVortexG, "spinningVortexG" },
+    { spinningVortexR, "spinningVortexR" },
+    { portal,          "portal" },
+    { portalB,         "portalB" },
+    { portalG,         "portalG" },
+    { portalR,         "portalR" },
+    { wings,           "wings" },
+    { wingsG,          "wingsG" },
+    { wingsR,          "wingsR" },
+    { wingsB,          "wingsB" },
+    { beacon,          "beacon" },
+    { sinelonUneven,   "sinelonUneven" },
+    { curtainCenter,   "curtainCenter" },
+    { curtainEdges,    "curtainEdges" },
+    { heartbeat,       "heartbeat" },
+    { sweep,           "sweep" },
+    { flower,          "flower" },
+};
+static constexpr uint8_t NUM_PATTERNS = sizeof(gPatterns) / sizeof(gPatterns[0]);
 
 // ---------------------------------------------------------------------------
 // Lookup tables for custom beat functions
@@ -260,27 +269,6 @@ static void map2Mapper(uint8_t hueBase, uint8_t hueVariance) {
 static void map3Mapper(CRGB ledsForMapping[]) {
     for (uint8_t i = 0; i < NUM_ANIM_LEDS; i++) {
         ledsForMapping[i] = ledsMap3[map3Mapping[i]];
-    }
-}
-
-static void map5Mapper(CRGB ledsForMapping[]) {
-    for (uint8_t i = 0; i < NUM_ANIM_LEDS; i++) {
-        ledsForMapping[i] = ledsMap5[map5Mapping[i]];
-    }
-}
-
-static void mapRotatorCW(uint8_t mapForRotation[], uint8_t sizeOfMapForRotation) {
-    uint8_t tempMap[27];
-    for (uint8_t i = 0; i < sizeOfMapForRotation; i++) {
-        tempMap[i] = mapForRotation[i];
-    }
-    mapForRotation[0]  = tempMap[8];
-    mapForRotation[9]  = tempMap[17];
-    mapForRotation[18] = tempMap[26];
-    for (uint8_t i = 1; i < 9; i++) {
-        mapForRotation[i]      = tempMap[i - 1];
-        mapForRotation[i + 9]  = tempMap[i + 8];
-        mapForRotation[i + 18] = tempMap[i + 17];
     }
 }
 
@@ -524,9 +512,9 @@ static void wingsG() { wingsColor(100, 60, 60); }
 static void wingsB() { wingsColor(175, 60, 100); }
 
 // ---- flower ----
+// Four colors in a petal layout (map3) that rotates one step around the rings
+// every FLOWER_STEP_MS, cross-fading between positions.
 static void flower() {
-    const uint16_t cycleTime = 1700;
-    const uint8_t segLen = NUM_ANIM_LEDS / 3;
     const uint8_t P0 = 0, P1 = 85, P2 = 170;
 
     uint8_t modeHueBase0 = 120;
@@ -544,48 +532,35 @@ static void flower() {
     ledsMap3[2] = CHSV(modeHue2, 255, 255);
     ledsMap3[3] = CHSV(modeHue3, 255, 255);
 
-    EVERY_N_MILLISECONDS(1000) { mapRotatorCW(map3Mapping, 27); }
-    map3Mapper(anim);
-    FastLED.setBrightness(workingBrightness);
-}
+    // Rotate one step every FLOWER_STEP_MS: hold the current position, then
+    // cross-fade into the next one instead of jumping.
+    const uint16_t FLOWER_STEP_MS = 1000;
+    const uint16_t FLOWER_HOLD_MS = 300;
+    uint32_t now   = millis();
+    uint8_t  step  = (now / FLOWER_STEP_MS) % 9;
+    uint16_t phase = now % FLOWER_STEP_MS;
+    uint8_t  t = (phase < FLOWER_HOLD_MS)
+                     ? 0
+                     : (uint32_t)(phase - FLOWER_HOLD_MS) * 255 / (FLOWER_STEP_MS - FLOWER_HOLD_MS);
 
-// ---- FST (flower smooth transition) ----
-static void FST() {
-    uint16_t cycleTime = 500;
-    uint32_t now = millis();
-    uint32_t elapsed = now - timerFST;
-    uint8_t transCoeff = (elapsed >= cycleTime)
-                             ? 255
-                             : (uint32_t)elapsed * 255 / cycleTime;
-
-    ledsMap5[0] = CHSV(100, 255, 255);
-    ledsMap5[1] = CHSV(200, 255, 255);
-    ledsMap5[2] = CHSV(40, 100, 190);
-
-    CRGB initialLeds[NUM_ANIM_LEDS];
-    map5Mapper(initialLeds);
+    CRGB from[NUM_ANIM_LEDS], to[NUM_ANIM_LEDS];
+    map3Mapper(from);
+    memcpy(to, from, sizeof(from));
+    ledsRotatorCW(from, NUM_ANIM_LEDS, step);
+    ledsRotatorCW(to, NUM_ANIM_LEDS, step + 1);
+    uint8_t eased = ease8InOutQuad(t);
     for (uint8_t i = 0; i < NUM_ANIM_LEDS; i++) {
-        FSTcurrentStartLeds[i] = initialLeds[i];
-        FSTcurrentEndLeds[i]   = initialLeds[i];
-    }
-    ledsRotatorCW(FSTcurrentStartLeds, NUM_ANIM_LEDS, counterFST);
-    ledsRotatorCW(FSTcurrentEndLeds, NUM_ANIM_LEDS, counterFST + 1);
-    uint8_t easedTransCoeff = ease8InOutQuad(transCoeff);
-    for (uint8_t i = 0; i < NUM_ANIM_LEDS; i++) {
-        anim[i] = blend(FSTcurrentStartLeds[i], FSTcurrentEndLeds[i], easedTransCoeff);
+        anim[i] = blend(from[i], to[i], eased);
     }
     FastLED.setBrightness(workingBrightness);
-    if (transCoeff == 255) {
-        timerFST = millis();
-        counterFST = (counterFST + 1) % 9;
-    }
 }
 
 // ---- beacon ----
+// The three segments pulse with offset triangle waves (ported from the ATmega
+// sketch).
 static void beacon() {
     const uint8_t bpm = 30;
     const uint8_t segLen = NUM_ANIM_LEDS / 3;
-    const uint8_t P0 = 0, P1 = 0, P2 = 0;
 
     uint8_t modeHue1 = beatsin8(15, gHueModifier, gHueModifier + 50, 0, 0);
     uint8_t modeHue2 = beatsin8(15, gHueModifier, gHueModifier + 50, 0, 85);
@@ -602,6 +577,144 @@ static void beacon() {
     fill_solid(&anim[0],          segLen, CHSV(modeHue1, 255, b0));
     fill_solid(&anim[segLen],     segLen, CHSV(modeHue2, 255, b1));
     fill_solid(&anim[segLen * 2], segLen, CHSV(modeHue3, 255, b2));
+    FastLED.setBrightness(workingBrightness);
+}
+
+// ---- column-based patterns (sinelonUneven, sweep, curtains, heartbeat) ----
+// The 27 animation pixels grouped into 7 virtual columns, ordered from one
+// side of the pendant to the other (column layout from upstream's sinelon).
+// -1 = unused slot.
+static const int8_t SINELON_VCOLS[7][5] = {
+    {  1,  2, -1, -1, -1 },
+    {  0, 10, 11, 12,  3 },
+    { 18, 19, 20, 21, 13 },
+    {  9, 22,  4, -1, -1 },
+    { 26, 25, 24, 23, 14 },
+    {  8, 17, 16, 15,  5 },
+    {  6,  7, -1, -1, -1 },
+};
+
+static void sinelonDrawCol(uint8_t col) {
+    CRGB color = CHSV(gHueModifier, 220, 255);
+    for (uint8_t i = 0; i < 5; i++) {
+        int8_t p = SINELON_VCOLS[col][i];
+        if (p >= 0) anim[p] += color;
+    }
+}
+
+// One fast pass from side to side in `sweep_ms`, then nothing new is drawn
+// until `period_ms` while the trail fades out slowly (`fade` per frame), then
+// the next pass goes back the other way.
+static void sinelonSweep(uint16_t sweep_ms, uint16_t period_ms, uint8_t fade) {
+    fadeToBlackBy(anim, NUM_ANIM_LEDS, fade);
+    uint32_t now   = millis();
+    uint32_t phase = now % period_ms;
+    if (phase < sweep_ms) {
+        uint8_t col = phase * 7 / sweep_ms;              // 0..6
+        if ((now / period_ms) & 1) col = 6 - col;        // alternate direction
+        sinelonDrawCol(col);
+    }
+    FastLED.setBrightness(workingBrightness);
+}
+
+// Back-and-forth with uneven legs: one direction takes `fast_pct` of the
+// motion time (one sweep cycle at `bpm`), the return takes the rest. Each leg
+// eases in/out like a sine sweep and has its own trail fade (lower = longer
+// tail). After the slow leg nothing is drawn for `pause_ms`, so its tail fades
+// out completely before the next fast pass starts.
+static void sinelonAsym(uint8_t bpm, uint8_t fast_pct, uint8_t fade_fast, uint8_t fade_slow,
+                        uint16_t pause_ms) {
+    uint32_t motion = 60000UL / bpm;
+    uint32_t fast   = motion * fast_pct / 100;
+    uint32_t phase  = millis() % (motion + pause_ms);
+    fadeToBlackBy(anim, NUM_ANIM_LEDS, phase < fast ? fade_fast : fade_slow);
+    if (phase < motion) {
+        uint8_t t;
+        bool    back;
+        if (phase < fast) { t = phase * 255 / fast;                     back = false; }
+        else              { t = (phase - fast) * 255 / (motion - fast); back = true;  }
+        uint8_t col = ((uint16_t)ease8InOutQuad(t) * 6 + 127) / 255;   // 0..6
+        if (back) col = 6 - col;
+        sinelonDrawCol(col);
+    }
+    FastLED.setBrightness(workingBrightness);
+}
+// 0.36 s fast pass (short trail), 0.84 s slow return (long trail), 0.72 s dark.
+static void sinelonUneven() { sinelonAsym(50, 30, 60, 20, 720); }
+// 0.3 s pass every 3 s, alternating direction, with a ~3 s fade.
+static void sweep()         { sinelonSweep(300, 3000, 4); }
+
+// ---- curtain ----
+// Quick open then close of a lit area across the 7 columns, then a slow fade
+// to black. `from_center`: the area grows from the middle column out to both
+// sides and shrinks back to the middle; otherwise it closes in from both
+// edges and reopens back to the edges. Columns the curtain leaves behind
+// fade with `fade_move`; after it closes everything fades with `fade_end`.
+static void curtain(bool from_center, uint16_t open_ms, uint16_t close_ms, uint16_t pause_ms,
+                    uint8_t fade_move, uint8_t fade_end) {
+    uint32_t phase = millis() % (open_ms + close_ms + pause_ms);
+    bool moving = phase < (uint32_t)open_ms + close_ms;
+    fadeToBlackBy(anim, NUM_ANIM_LEDS, moving ? fade_move : fade_end);
+    if (!moving) {
+        FastLED.setBrightness(workingBrightness);
+        return;
+    }
+    uint8_t t = (phase < open_ms) ? phase * 255 / open_ms
+                                  : 255 - (phase - open_ms) * 255 / close_ms;
+    uint8_t reach = ((uint16_t)ease8InOutQuad(t) * 3 + 127) / 255;  // 0..3 columns
+    CRGB color = CHSV(gHueModifier, 220, 255);
+    for (uint8_t col = 0; col < 7; col++) {
+        uint8_t dist = (col > 3) ? col - 3 : 3 - col;               // 0 = middle, 3 = edge
+        bool lit = from_center ? (dist <= reach) : (dist >= 3 - reach);
+        if (!lit) continue;
+        for (uint8_t i = 0; i < 5; i++) {
+            int8_t p = SINELON_VCOLS[col][i];
+            if (p >= 0) anim[p] = color;
+        }
+    }
+    FastLED.setBrightness(workingBrightness);
+}
+static void curtainCenter() { curtain(true,  250, 350, 1200, 40, 12); }
+static void curtainEdges()  { curtain(false, 250, 350, 1200, 40, 12); }
+
+// ---- heartbeat ----
+// Two quick center-out curtain pulses: a small dim one, a gap that fades to
+// near black, then a big full-width one, followed by a slow fade during the
+// rest of the beat.
+struct HeartPulse { uint16_t start_ms, open_ms, close_ms; uint8_t max_reach, value; };
+
+static void heartbeat() {
+    static const HeartPulse PULSES[2] = {
+        {   0,  99, 154, 1, 150 },   // small, dim: middle three columns only
+        { 418, 121, 220, 3, 255 },   // big: full width, full brightness
+    };
+    const uint16_t BEAT_MS = 1430;   // ≈42 beats per minute
+    uint32_t phase = millis() % BEAT_MS;
+
+    bool in_pulse = false;
+    for (const HeartPulse &hp : PULSES) {
+        if (phase < hp.start_ms || phase >= (uint32_t)hp.start_ms + hp.open_ms + hp.close_ms) continue;
+        in_pulse = true;
+        uint32_t p = phase - hp.start_ms;
+        uint8_t t = (p < hp.open_ms) ? p * 255 / hp.open_ms
+                                     : 255 - (p - hp.open_ms) * 255 / hp.close_ms;
+        uint8_t reach = ((uint16_t)ease8InOutQuad(t) * hp.max_reach + 127) / 255;
+        fadeToBlackBy(anim, NUM_ANIM_LEDS, 40);
+        CRGB color = CHSV(gHueModifier, 220, hp.value);
+        for (uint8_t col = 0; col < 7; col++) {
+            uint8_t dist = (col > 3) ? col - 3 : 3 - col;
+            if (dist > reach) continue;
+            for (uint8_t i = 0; i < 5; i++) {
+                int8_t px = SINELON_VCOLS[col][i];
+                if (px >= 0) anim[px] = color;
+            }
+        }
+    }
+    if (!in_pulse) {
+        // Between the pulses fade fast so they read as two separate beats;
+        // after the big one fade slowly through the rest of the beat.
+        fadeToBlackBy(anim, NUM_ANIM_LEDS, phase < PULSES[1].start_ms ? 60 : 14);
+    }
     FastLED.setBrightness(workingBrightness);
 }
 
@@ -624,21 +737,16 @@ void led_engine_setup() {
     leds[STATUS_LED_INDEX] = CRGB::Black;
 
     lastHueModTime = millis();
-    lastHueSinelonTime = millis();
     s_last_auto_cycle_ms = millis();
 }
 
 void led_engine_loop() {
     unsigned long now = millis();
 
-    // Advance hue counters
+    // Advance hue counter
     if (now - lastHueModTime >= 15) {
         gHueModifier++;
         lastHueModTime = now;
-    }
-    if (now - lastHueSinelonTime >= 10) {
-        gHueSinelon++;
-        lastHueSinelonTime = now;
     }
 
     // Auto-mode pattern cycling.
@@ -650,7 +758,7 @@ void led_engine_loop() {
         // When paused, keep the timer fresh so the full interval applies once
         // auto mode resumes.
         if (auto_cycling) {
-            g_animation_mode = (g_animation_mode + 1) % NUM_AUTO_PATTERNS;
+            g_animation_mode = (g_animation_mode + 1) % NUM_PATTERNS;
         }
         s_last_auto_cycle_ms = now;
     }
@@ -688,18 +796,23 @@ void led_engine_loop() {
             // Solid white mode
             fill_solid(anim, NUM_ANIM_LEDS, CRGB::White);
             FastLED.setBrightness(LED_BRIGHTNESS_WHITE);
-        } else if (!g_manual_mode_active) {
-            // Automatic mode: pattern selected by orchestra config / BLE
-            if (g_animation_mode >= NUM_AUTO_PATTERNS) {
-                g_animation_mode = 0;
-            }
-            gPatternsAuto[g_animation_mode]();
         } else {
-            // Manual mode: run the selected manual pattern
-            if (g_manual_pattern >= NUM_MANUAL_PATTERNS) {
-                g_manual_pattern = 0;
+            // Auto mode: pattern selected by the auto-cycle / BLE.
+            // Manual mode: pattern selected by the button.
+            uint8_t &idx = g_manual_mode_active ? g_manual_pattern : g_animation_mode;
+            if (idx >= NUM_PATTERNS) {
+                idx = 0;
             }
-            gPatternsManual[g_manual_pattern]();
+            static int16_t s_logged        = -1;
+            static bool    s_logged_manual = false;
+            if (idx != s_logged || g_manual_mode_active != s_logged_manual) {
+                s_logged        = idx;
+                s_logged_manual = g_manual_mode_active;
+                ESP_LOGI("ANIM", "%s pattern %u/%u: %s",
+                         g_manual_mode_active ? "Manual" : "Auto",
+                         idx + 1, NUM_PATTERNS, gPatterns[idx].name);
+            }
+            gPatterns[idx].fn();
         }
     } else {
         // Power is off: always keep animation LEDs black
@@ -769,11 +882,11 @@ void led_engine_loop() {
 }
 
 uint8_t led_engine_get_num_auto_patterns() {
-    return NUM_AUTO_PATTERNS;
+    return NUM_PATTERNS;
 }
 
 uint8_t led_engine_get_num_manual_patterns() {
-    return NUM_MANUAL_PATTERNS;
+    return NUM_PATTERNS;
 }
 
 void led_engine_set_white_mode(bool enable) {
