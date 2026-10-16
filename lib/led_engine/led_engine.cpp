@@ -76,8 +76,11 @@ static bool g_connecting_blink_active = false;
 #define CONNECTING_DOT_STEP_MS      150   // full lap ≈ 1.35 s
 #define CONNECTING_DOT_LEVEL        128   // blue only, further scaled by workingBrightness
 
-// Kivsee idle: no animation/trigger is playing. Shows nothing by itself (LEDs
-// stay dark); only gates the connecting dot so it never draws over an animation.
+// Connected-idle indicator: the same dot in green, slower, fading pixel to pixel.
+#define IDLE_DOT_STEP_MS            1000  // per-pixel crossfade; full lap ≈ 9 s
+
+// Kivsee idle: no animation/trigger is playing. Gates the ring dot (blue while
+// connecting, green once connected) so it never draws over an animation.
 static bool g_idle_blink_active = false;
 
 static led_src_t g_led_source = LED_SRC_FASTLED;
@@ -783,10 +786,21 @@ void led_engine_loop() {
                 // Connecting and nothing playing: one dim blue dot orbiting the
                 // outer ring, so the state is visible when the status pixel is
                 // hidden. A single lit pixel keeps the current draw minimal.
-                if (g_connecting_blink_active && g_idle_blink_active) {
+                // Connected and nothing playing: the same dot in green, slower.
+                if (g_idle_blink_active) {
                     fill_solid(anim, NUM_ANIM_LEDS, CRGB::Black);
-                    anim[(now / CONNECTING_DOT_STEP_MS) % CONNECTING_DOT_RING_LEDS] =
-                        CRGB(0, 0, CONNECTING_DOT_LEVEL);
+                    if (g_connecting_blink_active) {
+                        anim[(now / CONNECTING_DOT_STEP_MS) % CONNECTING_DOT_RING_LEDS] =
+                            CRGB(0, 0, CONNECTING_DOT_LEVEL);
+                    } else {
+                        // Crossfade each pixel into the next instead of stepping.
+                        uint32_t pos  = now / IDLE_DOT_STEP_MS;
+                        uint8_t  frac = (uint8_t)((now % IDLE_DOT_STEP_MS) * 255 / IDLE_DOT_STEP_MS);
+                        anim[pos % CONNECTING_DOT_RING_LEDS] =
+                            CRGB(0, scale8(CONNECTING_DOT_LEVEL, 255 - frac), 0);
+                        anim[(pos + 1) % CONNECTING_DOT_RING_LEDS] =
+                            CRGB(0, scale8(CONNECTING_DOT_LEVEL, frac), 0);
+                    }
                 }
                 FastLED.setBrightness(workingBrightness);
             }
@@ -899,6 +913,11 @@ bool led_engine_is_white_mode(void) {
 
 #ifdef LILUM_KIVSEE
 void led_engine_set_source(led_src_t src) {
+    // Kivsee content is tuned for the rings, so start brighter than standalone.
+    // RAM only: every kivsee boot or switch starts again at LED_BRIGHTNESS_KIVSEE.
+    if (src == LED_SRC_KIVSEE && g_led_source != LED_SRC_KIVSEE) {
+        workingBrightness = LED_BRIGHTNESS_KIVSEE;
+    }
     g_led_source = src;
 }
 

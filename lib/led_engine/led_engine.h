@@ -7,6 +7,7 @@
 #define LED_BRIGHTNESS_MIN   40
 #define LED_BRIGHTNESS_MAX   200
 #define LED_BRIGHTNESS_WHITE 120   // brightness used in white-light mode
+#define LED_BRIGHTNESS_KIVSEE 120  // brightness applied when kivsee mode takes over the LEDs
 #define LED_BRIGHTNESS_HOLD_MS 300 // hold duration at min/max during long-press ramp
 #define LED_BRIGHTNESS_STEP_MS 30  // interval between brightness increments
 
@@ -33,6 +34,7 @@ typedef enum {
     LED_SRC_KIVSEE  = 1,
 } led_src_t;
 
+// Switching to LED_SRC_KIVSEE also resets the brightness to LED_BRIGHTNESS_KIVSEE.
 void      led_engine_set_source(led_src_t src);
 led_src_t led_engine_get_source(void);
 
@@ -45,8 +47,8 @@ int          led_engine_num_anim_leds(void);
 // while no animation is playing, a single dim blue dot orbits the outer ring.
 void led_engine_set_connecting_blink(bool enable);
 
-// Kivsee idle flag: set while no animation/trigger is playing. Nothing is lit
-// for it; it only allows the connecting dot above to use the main LEDs.
+// Kivsee idle flag: set while no animation/trigger is playing. Lets the ring dot
+// use the main LEDs: blue while connecting, a slower green dot once connected.
 void led_engine_set_idle_blink(bool enable);
 #endif
 

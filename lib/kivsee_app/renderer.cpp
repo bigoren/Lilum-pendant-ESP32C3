@@ -5,6 +5,38 @@
 
 static const char *TAG = "KIVSEE_RND";
 
+// Standard HSB -> RGB, the same conversion the rings use (NeoPixelBus
+// HsbColor -> RgbColor), so a given hue looks the same on both. FastLED's
+// CHSV uses its own "rainbow" hue scale, which shifts hues noticeably (e.g. in
+// hue-step effects). h is wrapped into [0, 1), so negative hues work too.
+static CRGB hsbToRgb(float h, float s, float v)
+{
+    s = constrain(s, 0.0f, 1.0f);
+    v = constrain(v, 0.0f, 1.0f);
+    float r, g, b;
+    if (s == 0.0f) {
+        r = g = b = v;
+    } else {
+        h = fmodf(h, 1.0f);
+        if (h < 0.0f) h += 1.0f;
+        h *= 6.0f;
+        int sector = (int)h;
+        float f = h - sector;
+        float p = v * (1.0f - s);
+        float q = v * (1.0f - s * f);
+        float t = v * (1.0f - s * (1.0f - f));
+        switch (sector) {
+            case 0:  r = v; g = t; b = p; break;
+            case 1:  r = q; g = v; b = p; break;
+            case 2:  r = p; g = v; b = t; break;
+            case 3:  r = p; g = q; b = v; break;
+            case 4:  r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
+        }
+    }
+    return CRGB((uint8_t)(r * 255.0f), (uint8_t)(g * 255.0f), (uint8_t)(b * 255.0f));
+}
+
 namespace esp32animations
 {
 
@@ -121,10 +153,7 @@ namespace esp32animations
             // not honor the MQTT global brightness, which is tuned for the much larger
             // installations and would leave this 27-LED pendant far too dim.
             float normalizedBrightness = hsvVal.val * hsvVal.val;
-            uint8_t h = (uint8_t)(fmodf(hsvVal.hue, 1.0f) * 255.0f);
-            uint8_t s = (uint8_t)(hsvVal.sat * 255.0f);
-            uint8_t v = (uint8_t)(normalizedBrightness * 255.0f);
-            out[i] = CHSV(h, s, v);
+            out[i] = hsbToRgb(hsvVal.hue, hsvVal.sat, normalizedBrightness);
         }
         led_engine_anim_commit();
     }

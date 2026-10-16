@@ -241,11 +241,15 @@ The button on **GPIO 9** is polled every 5 ms with debounce. Actions:
 | **Long press (hold)** | Ramps brightness: up to max → holds → down to min → holds → repeats.|
 
 Brightness ranges from `LED_BRIGHTNESS_MIN` (40) to `LED_BRIGHTNESS_MAX` (200),
-defined in [lib/led_engine/led_engine.h](lib/led_engine/led_engine.h).
+defined in [lib/led_engine/led_engine.h](lib/led_engine/led_engine.h). It is
+not saved: every boot starts at 60 in standalone mode, and entering kivsee mode
+(at boot or by triple-press) sets it to `LED_BRIGHTNESS_KIVSEE` (120), since
+kivsee animations are tuned for the much larger rings. The pendant ignores the
+rings' MQTT `global_brightness`.
 
-In kivsee mode the short-press / brightness-ramp actions are suppressed (the
-network-driven renderer owns the LED buffer); double-press white-mode still
-works as a global override.
+In kivsee mode the short press does nothing (the network-driven renderer owns
+the LED buffer); the long-press brightness ramp and double-press white mode
+still work.
 
 ### 4. Tilt gesture (double-dip)
 

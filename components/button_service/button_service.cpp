@@ -158,10 +158,6 @@ static void brightness_ramp_tick(uint32_t now)
     }
     rampStepT = now;
 
-    if (button_in_kivsee_mode()) {
-        return;
-    }
-
     switch (rampPhase) {
     case RAMP_UP:
         if (workingBrightness < LED_BRIGHTNESS_MAX) {
