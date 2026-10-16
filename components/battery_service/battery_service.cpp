@@ -283,6 +283,15 @@ void battery_power_off(void)
     }
 }
 
+void battery_set_boost_keep_on(bool keep_on)
+{
+    // Keep-on disables the IP5306 light-load auto-shutdown (~32 s below ~50 mA).
+    // The register survives esp_restart(), so every mode sets it explicitly.
+    esp_err_t err = ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT2, keep_on);
+    ESP_LOGI(TAG, "Boost keep-on %s%s", keep_on ? "ON" : "OFF",
+             err == ESP_OK ? "" : " (I2C write failed)");
+}
+
 // ── ADC initialisation ─────────────────────────────────────
 
 static bool adc_init(void)

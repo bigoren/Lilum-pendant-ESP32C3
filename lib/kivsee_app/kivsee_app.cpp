@@ -15,6 +15,7 @@
 #include "esp_wifi.h"
 #include "led_engine.h"
 #include "app_mode.h"
+#include "battery_service.h"
 
 static const char *TAG = "KIVSEE";
 
@@ -118,6 +119,9 @@ void kivsee_app_setup(void)
     return;
   }
   ESP_LOGI(TAG, "Thing name: %s", thing_name);
+
+  // Idle kivsee draws too little to keep the IP5306 awake; stop it auto-off.
+  battery_set_boost_keep_on(true);
 
   wifi_first_attempt_ms = millis();
   wifi_ever_connected   = false;

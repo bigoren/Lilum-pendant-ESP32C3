@@ -209,6 +209,8 @@ extern "C" void app_main(void) {
         xTaskCreate(kivseeTask, "Kivsee Task", 8192, NULL, 1, NULL);
     } else {
         ESP_LOGI(TAG, "Boot mode: STANDALONE");
+        // Undo kivsee's keep-on, which survives the kivsee → standalone reboot.
+        battery_set_boost_keep_on(false);
     }
 #endif
 

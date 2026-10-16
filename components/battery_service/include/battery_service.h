@@ -38,6 +38,13 @@ void battery_service_start(void);
  */
 void battery_power_off(void);
 
+/**
+ * Keep the IP5306 boost output on under light load (true), or let it
+ * auto-shut down after ~32 s below ~50 mA (false). Persists across
+ * esp_restart(), so callers should set it explicitly per mode.
+ */
+void battery_set_boost_keep_on(bool keep_on);
+
 /** Battery level in approximate percent (0, 25, 50, 75, 100) or -1 on error. */
 int8_t battery_get_level(void);
 
