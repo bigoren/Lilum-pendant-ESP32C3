@@ -209,7 +209,7 @@ There are 23 patterns in one list, shared by both modes:
 
 Modes:
 
-- **Auto mode** (default at boot): advances to the next pattern every 30 s
+- **Auto mode** (default at boot): advances to the next pattern every 40 s
   (`AUTO_CYCLE_INTERVAL_MS`). Paused in white/manual mode and while kivsee
   mode owns the LEDs.
 - **Manual mode**: holds a single pattern; each short press steps to the next.

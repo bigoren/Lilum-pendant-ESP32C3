@@ -65,7 +65,7 @@ static bool g_white_mode = false;
 // While in auto mode, advance to the next auto pattern every
 // AUTO_CYCLE_INTERVAL_MS. Paused in white/manual mode and while the kivsee
 // renderer owns the LEDs.
-#define AUTO_CYCLE_INTERVAL_MS 30000
+#define AUTO_CYCLE_INTERVAL_MS 40000
 static unsigned long s_last_auto_cycle_ms = 0;
 
 #ifdef LILUM_KIVSEE
