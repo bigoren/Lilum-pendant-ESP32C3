@@ -83,6 +83,9 @@ static bool g_connecting_blink_active = false;
 // connecting, green once connected) so it never draws over an animation.
 static bool g_idle_blink_active = false;
 
+// Pending power-off: all LEDs dark (status pixel too), string power cut.
+static volatile bool g_soft_off = false;
+
 static led_src_t g_led_source = LED_SRC_FASTLED;
 #endif
 
@@ -769,6 +772,17 @@ void led_engine_loop() {
     // Update controllable output
     digitalWrite(OUTPUT_PIN, g_output_state ? HIGH : LOW);
 
+#ifdef LILUM_KIVSEE
+    // Soft off: everything dark and the string unpowered, so the load drops
+    // below the IP5306 light-load threshold and it shuts down by itself.
+    if (g_soft_off) {
+        digitalWrite(LED_POWER_PIN, LOW);
+        fill_solid(leds, TOTAL_LEDS, CRGB::Black);
+        FastLED.show();
+        return;
+    }
+#endif
+
     if (s_led_power_on) {
 #ifdef LILUM_KIVSEE
         if (g_led_source == LED_SRC_KIVSEE) {
@@ -948,5 +962,9 @@ void led_engine_set_connecting_blink(bool enable) {
 
 void led_engine_set_idle_blink(bool enable) {
     g_idle_blink_active = enable;
+}
+
+void led_engine_set_soft_off(bool enable) {
+    g_soft_off = enable;
 }
 #endif

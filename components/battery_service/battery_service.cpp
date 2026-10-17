@@ -55,6 +55,10 @@ static const char *TAG = "BAT";
 #define SYS_CTL1_BIT8      (1U << 7)  // boost control signal
 #define SYS_CTL1_BIT5      (1U << 5)  // short press boost switch
 
+// Bit masks – REG_SYS_CTL2
+#define SYS_CTL2_LIGHT_LOAD_MASK 0x0CU  // bits 3:2 = light-load shutdown time
+#define SYS_CTL2_LIGHT_LOAD_8S   0x00U  // shortest setting (unverified encoding)
+
 // Bit masks – REG_SYS_CTL3
 #define SYS_CTL3_LONG_PRESS_3S  (1U << 6)  // 0 = 2 s, 1 = 3 s
 
@@ -89,6 +93,8 @@ static const char *TAG = "BAT";
 
 // ── Periodic task ──────────────────────────────────────────
 #define BAT_POLL_MS         1000     // 1-second poll interval
+#define BAT_KEY_POLL_MS     50       // power-key register poll; fast enough to split a double press
+#define BAT_DOUBLE_GAP_MS   700      // two short presses within this = double press
 #define BAT_LOG_HEARTBEAT_MS 60000   // status log at least once a minute
 #define BAT_TASK_STACK      3072
 
@@ -103,6 +109,14 @@ static volatile bool    s_key_long      = false;
 static volatile bool    s_key_double    = false;
 static volatile bool    s_chg_inhibited = false;    // true when charging disabled due to temp
 static volatile battery_charge_status_t s_charge_status = BAT_CHG_NOT_CHARGING;
+
+// Power-key routing. Soft-off mode (kivsee): double/long press raise an off
+// request for the app instead of acting here. Otherwise the long press is
+// ignored and the IP5306's own double-press off handles power.
+static volatile bool     s_key_soft_off   = false;
+static volatile bool     s_off_request    = false;   // latched, cleared on read
+static volatile uint32_t s_short_count    = 0;       // monotonic short-press count
+static uint8_t           s_ctl2_boot      = 0xFF;    // SYS_CTL2 at init, for restore
 
 // ── Drain log ──────────────────────────────────────────────
 #define BAT_DRAIN_LOG_PATH     "/spiffs/bat_drain.csv"
@@ -267,6 +281,11 @@ static void ip5306_configure(void)
 
     // Set charging current to 0.25 A
     ip5306_set_charge_current();
+
+    // Remember the light-load shutdown time so a cancelled soft off can restore it.
+    if (ip5306_read_reg(IP5306_REG_SYS_CTL2, &s_ctl2_boot) == ESP_OK) {
+        ESP_LOGI(TAG, "SYS_CTL2 = 0x%02X", s_ctl2_boot);
+    }
 }
 
 // ── Power control ──────────────────────────────────────────
@@ -290,6 +309,83 @@ void battery_set_boost_keep_on(bool keep_on)
     esp_err_t err = ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT2, keep_on);
     ESP_LOGI(TAG, "Boost keep-on %s%s", keep_on ? "ON" : "OFF",
              err == ESP_OK ? "" : " (I2C write failed)");
+}
+
+void battery_set_light_load_fast(bool fast)
+{
+    uint8_t data;
+    if (s_ctl2_boot == 0xFF || ip5306_read_reg(IP5306_REG_SYS_CTL2, &data) != ESP_OK) {
+        ESP_LOGW(TAG, "Light-load time: SYS_CTL2 unavailable, unchanged");
+        return;
+    }
+    uint8_t bits = fast ? SYS_CTL2_LIGHT_LOAD_8S : (s_ctl2_boot & SYS_CTL2_LIGHT_LOAD_MASK);
+    uint8_t next = (data & ~SYS_CTL2_LIGHT_LOAD_MASK) | bits;
+    ip5306_write_reg(IP5306_REG_SYS_CTL2, next);
+    ESP_LOGI(TAG, "Light-load time %s: SYS_CTL2 0x%02X -> 0x%02X",
+             fast ? "shortest" : "restored", data, next);
+}
+
+void battery_set_key_soft_off(bool enable)
+{
+    s_key_soft_off = enable;
+    s_off_request  = false;
+}
+
+bool battery_key_off_request(void)
+{
+    bool r = s_off_request;
+    if (r) s_off_request = false;
+    return r;
+}
+
+uint32_t battery_key_press_count(void)
+{
+    return s_short_count;
+}
+
+// Reads and clears the IP5306 key latches. Called every BAT_KEY_POLL_MS so the
+// two presses of a double land in separate polls.
+static void battery_poll_key(void)
+{
+    static TickType_t s_last_short_tick = 0;
+    static bool       s_have_short      = false;
+
+    uint8_t key = 0;
+    if (ip5306_read_reg(IP5306_REG_KEY, &key) != ESP_OK || !(key & 0x07)) return;
+    ip5306_write_reg(IP5306_REG_KEY, key & 0x07);   // clear the latched bits
+    ESP_LOGD(TAG, "key reg 0x%02X", key);
+
+    const TickType_t now = xTaskGetTickCount();
+    bool is_double = (key & KEY_DOUBLE_CLICK_BIT) != 0;
+
+    if (key & KEY_SHORT_PRESS_BIT) {
+        s_key_short = true;
+        s_short_count++;
+        ESP_LOGI(TAG, "Power button SHORT press detected");
+        // The IP5306 may not report a double itself; pair short presses here.
+        if (s_have_short && now - s_last_short_tick <= pdMS_TO_TICKS(BAT_DOUBLE_GAP_MS)) {
+            is_double    = true;
+            s_have_short = false;
+        } else {
+            s_have_short      = true;
+            s_last_short_tick = now;
+        }
+    }
+    if (key & KEY_LONG_PRESS_BIT) {
+        s_key_long = true;
+        if (s_key_soft_off) {
+            ESP_LOGI(TAG, "Power button LONG press detected — off requested");
+            s_off_request = true;
+        } else {
+            ESP_LOGI(TAG, "Power button LONG press detected — ignored");
+        }
+    }
+    if (is_double) {
+        s_key_double = true;
+        ESP_LOGI(TAG, "Power button DOUBLE press detected%s",
+                 s_key_soft_off ? " — off requested" : "");
+        if (s_key_soft_off) s_off_request = true;
+    }
 }
 
 // ── ADC initialisation ─────────────────────────────────────
@@ -317,8 +413,19 @@ static void battery_task(void *arg)
     (void)arg;
 
     TickType_t xLastWake = xTaskGetTickCount();
+    TickType_t xLastFull = xLastWake - pdMS_TO_TICKS(BAT_POLL_MS);  // run full pass at once
 
     while (true) {
+        // ── Power key: every BAT_KEY_POLL_MS ──
+        battery_poll_key();
+
+        // Everything else runs once per BAT_POLL_MS.
+        if (xTaskGetTickCount() - xLastFull < pdMS_TO_TICKS(BAT_POLL_MS)) {
+            vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(BAT_KEY_POLL_MS));
+            continue;
+        }
+        xLastFull = xTaskGetTickCount();
+
         // ── IP5306 status ──
         s_bat_level   = ip5306_battery_level();
         s_charging    = ip5306_is_charging();
@@ -345,28 +452,6 @@ static void battery_task(void *arg)
 
         // ── Enforce 0.25 A charging current ──
         ip5306_set_charge_current();
-
-        // ── Button-press detection via register 0x77 ──
-        uint8_t key = 0;
-        if (ip5306_read_reg(IP5306_REG_KEY, &key) == ESP_OK && (key & 0x07)) {
-            if (key & KEY_SHORT_PRESS_BIT) {
-                s_key_short = true;
-                ESP_LOGI(TAG, "Power button SHORT press detected");
-            }
-            if (key & KEY_LONG_PRESS_BIT) {
-                s_key_long = true;
-                ESP_LOGI(TAG, "Power button LONG press detected — powering off");
-                // Clear the latched bits before shutting down
-                ip5306_write_reg(IP5306_REG_KEY, key & 0x07);
-                battery_power_off();   // does not return
-            }
-            if (key & KEY_DOUBLE_CLICK_BIT) {
-                s_key_double = true;
-                ESP_LOGI(TAG, "Power button DOUBLE-CLICK detected");
-            }
-            // Clear the event flags by writing the bits back
-            ip5306_write_reg(IP5306_REG_KEY, key & 0x07);
-        }
 
         // ── NTC temperature ──
         float t = ntc_read_temperature();
@@ -422,7 +507,7 @@ static void battery_task(void *arg)
                      s_temp_ok ? "(OK)" : "(OUT OF RANGE)");
         }
 
-        vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(BAT_POLL_MS));
+        vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(BAT_KEY_POLL_MS));
     }
 }
 

@@ -31,6 +31,21 @@ static const char *TAG = "KIVSEE";
 // MQTT failures are soft (cached render still works) and do NOT trigger this.
 #define WIFI_FIRST_CONNECT_TIMEOUT_MS  180000
 
+// Keep-on stops the IP5306 idle auto-off but also blocks its double-press off,
+// so power-off is done by soft off below. false = plain IP5306 behaviour.
+#define KIVSEE_BOOST_KEEP_ON  true
+
+// Soft off: on a double/long press, go dark, stop WiFi and drop keep-on so the
+// IP5306 light-load shutdown powers off for real (one click then turns it on).
+// A click while waiting cancels; presses in the grace window are the off
+// gesture itself.
+#define SOFT_OFF_GRACE_MS     1500
+#define SOFT_OFF_LOG_MS       10000
+static bool          soft_off          = false;
+static unsigned long soft_off_start_ms = 0;
+static unsigned long soft_off_log_ms   = 0;
+static uint32_t      soft_off_presses  = 0;
+
 #define MAX_THING_NAME_LENGTH 16
 static char thing_name[MAX_THING_NAME_LENGTH];
 
@@ -120,8 +135,10 @@ void kivsee_app_setup(void)
   }
   ESP_LOGI(TAG, "Thing name: %s", thing_name);
 
-  // Idle kivsee draws too little to keep the IP5306 awake; stop it auto-off.
-  battery_set_boost_keep_on(true);
+  // Idle kivsee draws too little to keep the IP5306 awake; keep-on stops the
+  // auto-off. Set explicitly either way: the register survives a restart.
+  battery_set_boost_keep_on(KIVSEE_BOOST_KEEP_ON);
+  battery_set_key_soft_off(true);
 
   wifi_first_attempt_ms = millis();
   wifi_ever_connected   = false;
@@ -172,9 +189,66 @@ static const char *rssi_quality(long rssi)
   return "poor";
 }
 
+static void soft_off_enter(unsigned long now)
+{
+  ESP_LOGW(TAG, "Soft off: LEDs + WiFi off, keep-on dropped; waiting for IP5306 "
+                "shutdown (click to cancel)");
+  soft_off          = true;
+  soft_off_start_ms = now;
+  soft_off_log_ms   = now;
+  soft_off_presses  = battery_key_press_count();
+  led_engine_set_soft_off(true);
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  battery_set_light_load_fast(true);
+  battery_set_boost_keep_on(false);
+}
+
+static void soft_off_cancel(unsigned long now)
+{
+  ESP_LOGW(TAG, "Soft off cancelled after %lu ms — restoring",
+           now - soft_off_start_ms);
+  soft_off = false;
+  battery_set_boost_keep_on(KIVSEE_BOOST_KEEP_ON);
+  battery_set_light_load_fast(false);
+  battery_key_off_request();            // drop any stale request
+  led_engine_set_soft_off(false);
+  if (!wifi_ever_connected) wifi_first_attempt_ms = now;  // restart the fallback timer
+  lastWiFiCheckTime = now - 10000;      // reconnect on this loop pass
+}
+
+// Returns true while soft off owns the loop.
+static bool soft_off_loop(unsigned long now)
+{
+  if (!soft_off) {
+    if (battery_key_off_request()) soft_off_enter(now);
+    return soft_off;
+  }
+
+  uint32_t presses = battery_key_press_count();
+  if (now - soft_off_start_ms < SOFT_OFF_GRACE_MS) {
+    soft_off_presses = presses;         // still part of the off gesture
+  } else if (presses != soft_off_presses) {
+    soft_off_cancel(now);
+    return false;
+  }
+
+  if (now - soft_off_log_ms >= SOFT_OFF_LOG_MS) {
+    soft_off_log_ms = now;
+    ESP_LOGI(TAG, "Soft off: still powered after %lu s (USB connected?)",
+             (now - soft_off_start_ms) / 1000);
+  }
+  return true;
+}
+
 void kivsee_app_loop(void)
 {
   unsigned long current_millis = millis();
+
+  if (soft_off_loop(current_millis)) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return;
+  }
 
   // Latch wifi_ever_connected the moment status flips — independent of the
   // 10 s ConnectToWifi cadence and any MQTT-bringup blocking inside it.
@@ -218,8 +292,8 @@ void kivsee_app_loop(void)
     unsigned m = (s / 60) % 60;
     unsigned sec = s % 60;
     long rssi = (long)WiFi.RSSI();
-    ESP_LOGI(TAG, "uptime=%02u:%02u:%02u wifi=%s mqtt=%s signal=%s",
-             h, m, sec,
+    ESP_LOGI(TAG, "uptime=%02u:%02u:%02u cpu=%uMHz wifi=%s mqtt=%s signal=%s",
+             h, m, sec, (unsigned)getCpuFrequencyMhz(),
              wifi_connected ? "con" : "uncon",
              mqttManager->connected() ? "con" : "uncon",
              wifi_connected ? rssi_quality(rssi) : "n/a");

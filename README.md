@@ -301,6 +301,19 @@ on the ADC for temperature. Capabilities:
 There is no power-on confirmation gate: once the IP5306 powers the board the
 firmware boots straight into the animations.
 
+Power button (IP5306 key):
+
+- **Standalone:** one click on, double click off — handled by the IP5306
+  itself. The firmware ignores the long press.
+- **Kivsee:** the IP5306 is set to *keep-on*, because an idle pendant draws
+  less than its ~45 mA light-load threshold and would otherwise shut off after
+  ~30–90 s. Keep-on also blocks the IP5306's own double-click off, so the
+  firmware does a **soft off** instead: on a double or long press it blanks all
+  LEDs, cuts LED string power, stops WiFi and drops keep-on, then waits for the
+  IP5306's light-load shutdown to power off for real (so one click turns it on
+  again). A click while waiting cancels and restores everything. On USB power
+  the shutdown never happens; the pendant stays dark until clicked.
+
 **How to use:** enable
 `LOG_ENABLE_BATTERY` (on by default) to see level/charge/temperature over serial.
 

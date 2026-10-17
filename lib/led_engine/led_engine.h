@@ -50,6 +50,10 @@ void led_engine_set_connecting_blink(bool enable);
 // Kivsee idle flag: set while no animation/trigger is playing. Lets the ring dot
 // use the main LEDs: blue while connecting, a slower green dot once connected.
 void led_engine_set_idle_blink(bool enable);
+
+// Pending power-off: every LED dark (status pixel included) and the LED string
+// unpowered, overriding white mode and the renderer until cleared.
+void led_engine_set_soft_off(bool enable);
 #endif
 
 #ifdef __cplusplus

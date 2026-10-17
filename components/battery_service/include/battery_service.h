@@ -45,6 +45,26 @@ void battery_power_off(void);
  */
 void battery_set_boost_keep_on(bool keep_on);
 
+/**
+ * true: set the IP5306 light-load shutdown time to its shortest setting, so a
+ * soft off completes quickly. false: restore the value read at init.
+ */
+void battery_set_light_load_fast(bool fast);
+
+/**
+ * Power-key routing. Enabled (kivsee): a double or long press raises an off
+ * request (see battery_key_off_request) instead of acting in this service.
+ * Disabled (default): the long press is ignored; the IP5306's own
+ * double-press off handles power.
+ */
+void battery_set_key_soft_off(bool enable);
+
+/** Returns true exactly once after an off request (soft-off mode only). */
+bool battery_key_off_request(void);
+
+/** Monotonic count of power-key short presses, for detecting a new press. */
+uint32_t battery_key_press_count(void);
+
 /** Battery level in approximate percent (0, 25, 50, 75, 100) or -1 on error. */
 int8_t battery_get_level(void);
 
