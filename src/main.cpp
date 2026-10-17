@@ -162,7 +162,7 @@ extern "C" void app_main(void) {
 
     ESP_LOGI(TAG, "Calling initArduino...");
     initArduino();
-    ESP_LOGI(TAG, "initArduino done");
+    ESP_LOGI(TAG, "initArduino done (CPU %u MHz)", (unsigned)getCpuFrequencyMhz());
 
     int rc;
 

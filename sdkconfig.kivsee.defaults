@@ -7,5 +7,7 @@
 # CONFIG_BT_ENABLED is not set
 # CONFIG_BT_NIMBLE_ENABLED is not set
 
-# Run at 80 MHz — halves dynamic CPU power.
+# Run at 80 MHz — halves dynamic CPU power. The _80 choice symbol is what
+# selects it; _MHZ alone is derived from the choice and gets overridden.
+CONFIG_ESP32C3_DEFAULT_CPU_FREQ_80=y
 CONFIG_ESP32C3_DEFAULT_CPU_FREQ_MHZ=80
