@@ -24,10 +24,9 @@ static const char *TAG = "BAT";
 #define IP5306_REG_SYS_CTL0 0x00U
 #define IP5306_REG_SYS_CTL1 0x01U
 #define IP5306_REG_SYS_CTL2 0x02U
-#define IP5306_REG_SYS_CTL3 0x03U   // bit 6 = long-press time (0 = 2 s, 1 = 3 s)
 #define IP5306_REG_READ0    0x70U   // bit 3 = charging
 #define IP5306_REG_READ1    0x71U   // bit 3 = charge full
-#define IP5306_REG_READ2    0x72U   // bit 5 = light load, bit 0 = low-power shutdown
+#define IP5306_REG_READ2    0x72U   // light-load flag: bit position unconfirmed on our chip (unused)
 #define IP5306_REG_READ3    0x78U   // battery level (4 discrete steps)
 #define IP5306_REG_KEY      0x77U   // bit 0 = short press, bit 1 = long press, bit 2 = double-click
 #define IP5306_REG_CHG_CTL0 0x20U
@@ -45,22 +44,27 @@ static const char *TAG = "BAT";
 #define KEY_LONG_PRESS_BIT   0x02U
 #define KEY_DOUBLE_CLICK_BIT 0x04U
 
-// Bit masks – REG_SYS_CTL0
-#define SYS_CTL0_BIT5      (1U << 5)  // boost mode enable
-#define SYS_CTL0_BIT2      (1U << 1)  // boost output enable
-#define SYS_CTL0_BIT3      (1U << 2)  // power on load
-#define CHARGER_EN_BIT      0x10U      // bit 4 = charger on/off
+// Bit masks. Meanings as measured on our chips (2026-10 register tests), which
+// match the IP5306 I2C register sheet. Every register reverts to the chip's
+// defaults whenever the IP5306 itself powers off, but survives an ESP reboot,
+// so each mode sets what it relies on.
+//
+// REG_SYS_CTL0 (default 0x35)
+#define SYS_CTL0_BOOST_EN        (1U << 5)  // boost enable
+#define CHARGER_EN_BIT            0x10U      // bit 4 = charger on/off
+#define SYS_CTL0_LOAD_AUTO_ON    (1U << 2)  // power on when a load is plugged in (default 1; no effect seen)
+#define SYS_CTL0_KEEP_ON         (1U << 1)  // boost stays on under light load; also blocks double-click off
+#define SYS_CTL0_KEY_SHUTDOWN_EN (1U << 0)  // power key may turn the chip off (default 1)
 
-// Bit masks – REG_SYS_CTL1
-#define SYS_CTL1_BIT8      (1U << 7)  // boost control signal
-#define SYS_CTL1_BIT5      (1U << 5)  // short press boost switch
+// REG_SYS_CTL1 (default 0x1D)
+#define SYS_CTL1_OFF_BY_LONG     (1U << 7)  // off signal: 1 = long press, 0 = double-click (default)
+#define SYS_CTL1_CLICK_TOGGLES   (1U << 5)  // 1 = a single click toggles power on/off (default 0)
+#define SYS_CTL1_VIN_OFF_BOOST   (1U << 2)  // boost back on when the charger is unplugged (default 1)
 
-// Bit masks – REG_SYS_CTL2
-#define SYS_CTL2_LIGHT_LOAD_MASK 0x0CU  // bits 3:2 = light-load shutdown time
-#define SYS_CTL2_LIGHT_LOAD_8S   0x00U  // shortest setting (unverified encoding)
-
-// Bit masks – REG_SYS_CTL3
-#define SYS_CTL3_LONG_PRESS_3S  (1U << 6)  // 0 = 2 s, 1 = 3 s
+// REG_SYS_CTL2 (default 0x64)
+#define SYS_CTL2_LONG_PRESS_3S   (1U << 4)  // long-press time: 0 = 2 s (default), 1 = 3 s
+#define SYS_CTL2_LIGHT_LOAD_MASK 0x0CU      // bits 3:2 = light-load shutdown time
+#define SYS_CTL2_LIGHT_LOAD_8S   0x00U      // 00 = 8 s (01 = 32 s default, 10 = 16 s, 11 = 64 s)
 
 // Charging current: I_mA = (value × 100) + 50
 // 0.25 A = 250 mA → value = (250 − 50) / 100 = 2
@@ -110,8 +114,9 @@ static volatile bool    s_key_double    = false;
 static volatile bool    s_chg_inhibited = false;    // true when charging disabled due to temp
 static volatile battery_charge_status_t s_charge_status = BAT_CHG_NOT_CHARGING;
 
-// Power-key routing. Soft-off mode (kivsee): double/long press raise an off
-// request for the app instead of acting here. Otherwise the long press is
+// Power-key routing, the same gestures in both modes: one click on, double-click
+// off, long press ignored. Soft-off mode (kivsee): a double-click raises an off
+// request for the app instead of acting here. Otherwise the double-click is
 // ignored and the IP5306's own double-press off handles power.
 static volatile bool     s_key_soft_off   = false;
 static volatile bool     s_off_request    = false;   // latched, cleared on read
@@ -267,25 +272,24 @@ static void ip5306_set_charge_current(void)
 
 static void ip5306_configure(void)
 {
-    // SYS_CTL0
-    // ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT5, true);  // enable boost mode
-    // ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT2, true);  // enable boost output
-    //ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT3, false); // disable power on load
+    // SYS_CTL0 stays at the chip defaults; keep-on is set per mode
+    // (battery_set_boost_keep_on).
 
-    // SYS_CTL1
-    ip5306_updateBits(IP5306_REG_SYS_CTL1, SYS_CTL1_BIT8, false); // disable boost control signal
-    ip5306_updateBits(IP5306_REG_SYS_CTL1, SYS_CTL1_BIT5, false);  // enable short press boost
-
-    // SYS_CTL3 — long-press duration = 3 s (bit 6 = 1)
-    ip5306_updateBits(IP5306_REG_SYS_CTL3, SYS_CTL3_LONG_PRESS_3S, true);
+    // SYS_CTL1: double-click is the off signal, and a single click does not
+    // toggle power (both chip defaults, set explicitly).
+    ip5306_updateBits(IP5306_REG_SYS_CTL1, SYS_CTL1_OFF_BY_LONG, false);
+    ip5306_updateBits(IP5306_REG_SYS_CTL1, SYS_CTL1_CLICK_TOGGLES, false);
 
     // Set charging current to 0.25 A
     ip5306_set_charge_current();
 
     // Remember the light-load shutdown time so a cancelled soft off can restore it.
-    if (ip5306_read_reg(IP5306_REG_SYS_CTL2, &s_ctl2_boot) == ESP_OK) {
-        ESP_LOGI(TAG, "SYS_CTL2 = 0x%02X", s_ctl2_boot);
-    }
+    ip5306_read_reg(IP5306_REG_SYS_CTL2, &s_ctl2_boot);
+    uint8_t ctl0 = 0, ctl1 = 0;
+    ip5306_read_reg(IP5306_REG_SYS_CTL0, &ctl0);
+    ip5306_read_reg(IP5306_REG_SYS_CTL1, &ctl1);
+    ESP_LOGI(TAG, "IP5306 SYS_CTL0 = 0x%02X, SYS_CTL1 = 0x%02X, SYS_CTL2 = 0x%02X",
+             ctl0, ctl1, s_ctl2_boot);
 }
 
 // ── Power control ──────────────────────────────────────────
@@ -295,7 +299,7 @@ void battery_power_off(void)
 {
     ESP_LOGW(TAG, ">>> Powering OFF: clearing IP5306 BOOST_EN <<<");
     // Drop boost → 5V rail collapses → ESP loses power.
-    ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT5, false);
+    ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BOOST_EN, false);
     // Should not return; if rail decays slowly, hang here.
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -304,10 +308,21 @@ void battery_power_off(void)
 
 void battery_set_boost_keep_on(bool keep_on)
 {
-    // Keep-on disables the IP5306 light-load auto-shutdown (~32 s below ~50 mA).
+    // Keep-on disables the IP5306 light-load auto-shutdown (32 s below ~50 mA
+    // by default), and also blocks the chip's own double-click off.
     // The register survives esp_restart(), so every mode sets it explicitly.
-    esp_err_t err = ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_BIT2, keep_on);
+    esp_err_t err = ip5306_updateBits(IP5306_REG_SYS_CTL0, SYS_CTL0_KEEP_ON, keep_on);
     ESP_LOGI(TAG, "Boost keep-on %s%s", keep_on ? "ON" : "OFF",
+             err == ESP_OK ? "" : " (I2C write failed)");
+}
+
+void battery_set_boost_on_unplug(bool on)
+{
+    // true: unplugging the charger restarts the boost, so the pendant reboots
+    // and keeps running on battery. false: it switches off and waits for a click.
+    // Survives esp_restart() but not an IP5306 power-off (default true).
+    esp_err_t err = ip5306_updateBits(IP5306_REG_SYS_CTL1, SYS_CTL1_VIN_OFF_BOOST, on);
+    ESP_LOGI(TAG, "Charger unplug: %s%s", on ? "keep running" : "switch off",
              err == ESP_OK ? "" : " (I2C write failed)");
 }
 
@@ -372,13 +387,9 @@ static void battery_poll_key(void)
         }
     }
     if (key & KEY_LONG_PRESS_BIT) {
+        // Not an off gesture in either mode, so both modes behave the same.
         s_key_long = true;
-        if (s_key_soft_off) {
-            ESP_LOGI(TAG, "Power button LONG press detected — off requested");
-            s_off_request = true;
-        } else {
-            ESP_LOGI(TAG, "Power button LONG press detected — ignored");
-        }
+        ESP_LOGI(TAG, "Power button LONG press detected — ignored");
     }
     if (is_double) {
         s_key_double = true;

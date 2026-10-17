@@ -35,7 +35,7 @@ static const char *TAG = "KIVSEE";
 // so power-off is done by soft off below. false = plain IP5306 behaviour.
 #define KIVSEE_BOOST_KEEP_ON  true
 
-// Soft off: on a double/long press, go dark, stop WiFi and drop keep-on so the
+// Soft off: on a double-click, go dark, stop WiFi and drop keep-on so the
 // IP5306 light-load shutdown powers off for real (one click then turns it on).
 // A click while waiting cancels; presses in the grace window are the off
 // gesture itself.
@@ -139,6 +139,9 @@ void kivsee_app_setup(void)
   // auto-off. Set explicitly either way: the register survives a restart.
   battery_set_boost_keep_on(KIVSEE_BOOST_KEEP_ON);
   battery_set_key_soft_off(true);
+  // Off the charger a kivsee pendant keeps running (it reboots onto battery);
+  // standalone sets this to off, and an in-place switch arrives from there.
+  battery_set_boost_on_unplug(true);
 
   wifi_first_attempt_ms = millis();
   wifi_ever_connected   = false;

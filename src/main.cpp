@@ -211,6 +211,8 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "Boot mode: STANDALONE");
         // Undo kivsee's keep-on, which survives the kivsee → standalone reboot.
         battery_set_boost_keep_on(false);
+        // Taking a standalone pendant off the charger switches it off.
+        battery_set_boost_on_unplug(false);
     }
 #endif
 

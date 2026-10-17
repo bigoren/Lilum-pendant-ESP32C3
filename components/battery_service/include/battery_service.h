@@ -20,7 +20,7 @@ typedef enum {
  * Must be called AFTER imu_service_init() so the I2C bus is already up.
  *
  * This now ONLY brings up the hardware and configures the IP5306
- * (including 3 s long-press time). The periodic monitor task is NOT
+ * (off signal, charge current; logs SYS_CTL0..2). The periodic monitor task is NOT
  * started here — call battery_service_start() once the rest of the
  * system is up.
  */
@@ -40,10 +40,18 @@ void battery_power_off(void);
 
 /**
  * Keep the IP5306 boost output on under light load (true), or let it
- * auto-shut down after ~32 s below ~50 mA (false). Persists across
- * esp_restart(), so callers should set it explicitly per mode.
+ * auto-shut down after ~32 s below ~50 mA (false). Keep-on also blocks the
+ * chip's own double-click off. Persists across esp_restart(), so callers
+ * should set it explicitly per mode.
  */
 void battery_set_boost_keep_on(bool keep_on);
+
+/**
+ * What unplugging the charger does: true = the boost restarts and the pendant
+ * reboots onto battery (chip default); false = the pendant switches off until
+ * the next click. Persists across esp_restart(), so set it per mode.
+ */
+void battery_set_boost_on_unplug(bool on);
 
 /**
  * true: set the IP5306 light-load shutdown time to its shortest setting, so a
@@ -52,10 +60,10 @@ void battery_set_boost_keep_on(bool keep_on);
 void battery_set_light_load_fast(bool fast);
 
 /**
- * Power-key routing. Enabled (kivsee): a double or long press raises an off
- * request (see battery_key_off_request) instead of acting in this service.
- * Disabled (default): the long press is ignored; the IP5306's own
- * double-press off handles power.
+ * Power-key routing. Both modes: one click on, double-click off, long press
+ * ignored. Enabled (kivsee): a double-click raises an off request (see
+ * battery_key_off_request) instead of acting in this service. Disabled
+ * (default): the IP5306's own double-press off handles power.
  */
 void battery_set_key_soft_off(bool enable);
 
